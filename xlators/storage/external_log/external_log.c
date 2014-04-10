@@ -51,6 +51,12 @@ static void insert_cache_item(struct hash_item* head, struct cache_item* data) {
 		head->head = data;
 		return;
 	}
+
+	int a1,a2,b1,b2;
+	a1 = head->head->offset;
+	a2 = head->head->offset + head->head->size;
+	b1 = data->offset;
+	b2 = data->offset + data->size;
 	if(head->head->offset > data->offset + size) {
 		data->next = head->head;
 		head->head = data;
