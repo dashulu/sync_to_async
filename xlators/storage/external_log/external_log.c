@@ -46,44 +46,68 @@ int merge_iovec(struct cache_item* cache, struct iovec* vec, int count, uint32_t
 
 }
 
-static void insert_cache_item(struct hash_item* head, struct cache_item* data) {
-	if(head->head == NULL) {
-		head->head = data;
+
+static void insert_cache_item(struct cache_item** head, struct cache_item* data) {
+	if(head == NULL) {
+		(*head) = data;
 		return;
 	}
 
 	int a1,a2,b1,b2;
-	a1 = head->head->offset;
-	a2 = head->head->offset + head->head->size;
+	a1 = (*head)->offset;
+	a2 = (*head)->offset + (*head)->size;
 	b1 = data->offset;
 	b2 = data->offset + data->size;
-	if(head->head->offset > data->offset + size) {
-		data->next = head->head;
-		head->head = data;
+	if(a1 > b2`) {
+		data->next = (*head);
+		(*head) = data;
 		return;
-	} else if(head->head->offset <= data->offset + data->size && 
-				data->offset + data->size <= head->head->offset + head->head->size) {
-		int overlap = (data->offset + data->size - head->head->offset);
-		int size = head->head->offset + head->head->size - data->offset;
+	} else if(b1 <= a1 && b2 >= a1 && b2 <= a2) {
+		int overlap = b2 - a1;
+		int size = a2 - b1;
 		char* tmp = malloc(size);
 		memcpy(tmp, data->data, data->size);
-		memcpy(tmp + data->size, head->head->data + overlap,
-			head->head->size - overlap);
-		free(head->head->data);
-		head->head->data = tmp;
-		head->head->size = size;
-		head->head->offset = data->offset;
-		head->head->is_dirty = true;
+		memcpy(tmp + data->size, (*head)->data + overlap,
+			(*head)->size - overlap);
+		free((*head)->data);
+		(*head)->data = tmp;
+		(*head)->size = size;
+		(*head)->offset = data->offset;
+		(*head)->is_dirty = true;
 		free(data->data);
 		free(data);
-	} else if(head->head)
+	} else if(b1 <= a1 && a2 <= b2) {
+		struct cache_item* tmp = (*head);
+		(*head) = data;
+		free(tmp->data);
+		free(tmp);
+	} else if(a1 <= b1 && b1 <= a2 && a2 <= b2) {
+		char* tmp = malloc(b2 - a1);
+		memcpy(tmp, (*head)->data, b1 - a1);
+		memcpy(tmp + b1 - a1, data->data, b2 - b1);
+		free((*head)->data);
+		(*head)->data = tmp;
+		(*head)->size = b2 - a1;
+		(*head)->offset = a1;
+		(*head)->is_dirty = true;
+		free(data->data);
+		free(data);
+	} else if(a1 <= b1 && b2 <= a2) {
+		memcpy((*head)->data + b1 - a1, data->data, b2 - b1);
+		free(data->data);
+		free(data);
+	} else {
+		insert_cache_item(&((*head)->next), data);
+	}
 }
+
+
 
 int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 	int hash_value;
 	char* filename;
 	int i;
-	struct hash_item* p;
+	struct hash_item** p;
 	struct hash_item* q;
 	struct cache_item* tmp;
 
@@ -103,26 +127,21 @@ int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 
 	hash_value = external_log_hash(filename);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
-	if(hashtable[hash_value] == NULL) {
-		hashtable[hash_value] = malloc(sizeof(struct hash_item));
-		hashtable[hash_value]->pathname = malloc(strlen(filename) + 1);
-		strcpy(hashtable[hash_value]->pathname, filename);
-		hashtable[hash_value]->next = NULL;
-		hashtable[hash_value]->head = tmp;
-	} else {
-		q = hashtable[hash_value];
-		p = q->next;
-
-		if(!strcmp(q->pathname, filename)) {
-
-		} else {
-			while(p != NULL) {
-				if(!strcmp(p->pathname, filename)) {
-					break;
-				}
-				p = p->next;
-			}
+	p = &(hashtable[hash_value]);
+	while(true) {
+		if((*p) == NULL) {
+			(*p) = malloc(sizeof(struct hash_item));
+			(*p)->pathname = malloc(strlen(filename) + 1);
+			strcpy((*p)->pathname, filename);
+			(*p)->next = NULL;
+			(*p)->head = tmp;
+			break;
 		}
+		if(!strcmp(filename, (*p)->pathname)) {
+			insert_cache_item(&((*p)->head), tmp);
+			break;
+		}
+		p = &((*p)->next);
 	}
 	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 }
