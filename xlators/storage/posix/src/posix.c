@@ -1997,6 +1997,7 @@ __posix_pwritev (int fd, struct iovec *vector, int count, off_t offset)
         int32_t         op_ret = 0;
         int             idx = 0;
         int             retval = 0;
+        int             nilfs_retval = 0;
         off_t           internal_off = 0;
 
         if (!vector)
@@ -2006,11 +2007,20 @@ __posix_pwritev (int fd, struct iovec *vector, int count, off_t offset)
         for (idx = 0; idx < count; idx++) {
                 retval = pwrite (fd, vector[idx].iov_base, vector[idx].iov_len,
                                  internal_off);
+/*                nilfs_retval = pwrite (nilfs_fd, vector[idx].iov_base, vector[idx].iov_len,
+                                 nilfs_offset);
+                if (retval == -1 || nilfs_retval == -1) {
+                        op_ret = -errno;
+                        goto err;
+                }
+*/
                 if (retval == -1) {
                         op_ret = -errno;
                         goto err;
                 }
                 op_ret += retval;
+                nilfs_offset += nilfs_retval;
+
                 internal_off += retval;
         }
 
@@ -2350,6 +2360,7 @@ posix_fsync (call_frame_t *frame, xlator_t *this,
                 ;
 #ifdef HAVE_FDATASYNC
                 op_ret = fdatasync (_fd);
+ //               op_ret = fdatasync (nilfs_fd);
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "fdatasync on fd=%p failed: %s",
@@ -2358,6 +2369,7 @@ posix_fsync (call_frame_t *frame, xlator_t *this,
 #endif
         } else {
                 op_ret = fsync (_fd);
+//                op_ret = fsync (nilfs_fd);
                 if (op_ret == -1) {
                         op_errno = errno;
                         gf_log (this->name, GF_LOG_ERROR,
@@ -4522,6 +4534,8 @@ init (xlator_t *this)
 		}
 	}
 
+     nilfs_fd = open("/home/user/sdb1/log", O_RDWR);
+
         pthread_mutex_init (&_private->janitor_lock, NULL);
         pthread_cond_init (&_private->janitor_cond, NULL);
         INIT_LIST_HEAD (&_private->janitor_fds);
@@ -4538,6 +4552,8 @@ fini (xlator_t *this)
         if (!priv)
                 return;
         this->private = NULL;
+
+        close(nilfs_fd);
         /*unlock brick dir*/
         if (priv->mount_lock)
                 closedir (priv->mount_lock);
