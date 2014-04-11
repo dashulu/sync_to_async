@@ -63,6 +63,29 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 	a2 = (*head)->offset + (*head)->size;
 	b1 = data->offset;
 	b2 = data->offset + data->size;
+
+	if((*head)->next != NULL) {
+		if(b1 <= a2 && b2 >= (*head)->next->offset) {
+			int c1 = (*head)->next->offset;
+			int c2 = (*head)->next->offset + (*head)->next->size;
+			char* tmp = malloc(c2 - a1);
+			memcpy(tmp, (*head)->data, b1 - a1);
+			memcpy(tmp + b1 - a1, data->data, b2 - b1);
+			memcpy(tmp + b2 - a1, (*head)->next->data + b2 - c1, c2 - b2);
+			free((*head)->data);
+			(*head)->data = tmp;
+			(*head)->size = c2 - a1;
+			(*head)->is_dirty = 1;
+			free(data->data);
+			free(data);
+			struct cache_item* item = (*head)->next;
+			(*head)->next = item->next;
+			free(item->data);
+			free(item);
+			return;
+		}
+	}
+
 	if(a1 > b2) {
 		data->next = (*head);
 		(*head) = data;
@@ -322,6 +345,16 @@ void insert_item_test() {
 	vec = get_iovec(4, 'h');
 	insert_item(0, vec, 4, 2000);
 	free_iovec(vec, 4);
+
+	vec = get_iovec(4, 'i');
+	insert_item(0, vec, 4, 2990);
+	free_iovec(vec, 4);
+	vec = get_iovec(4, 'j');
+	insert_item(0, vec, 4, 3005);
+	free_iovec(vec, 4);
+	vec = get_iovec(5, 'k');
+	insert_item(0, vec, 5, 2995);
+	free_iovec(vec, 5);
 
 }
 
