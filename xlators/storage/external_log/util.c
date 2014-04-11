@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-unsigned int external_log_hash(char* str) {
+unsigned int external_log_hash(char* str, int upper_bound) {
 	unsigned int h;
 	unsigned char *p;
 
@@ -12,6 +12,6 @@ unsigned int external_log_hash(char* str) {
 	for(h = 0,p = (unsigned char *) str;*p; p++)
 		h = 31 * h + *p;
 
-	return h % 4099;
+	return h % upper_bound;
 }
 

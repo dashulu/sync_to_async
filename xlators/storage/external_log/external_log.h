@@ -45,7 +45,7 @@ struct cache_item {
 	char* data;
 	uint32_t size;
 	uint32_t offset;
-	char is_dirty;
+	int is_dirty;
 //	bool is_commiting;
 	struct cache_item* next;
 	pthread_mutex_t lock;
@@ -62,7 +62,7 @@ struct hash_item {
 };
 
 #define NUM_FD 1024
-#define HASH_ITEM_NUM 4099
+#define HASH_ITEM_NUM 10
 
 // a map from fd to the path of file. fd is the index;
 char* file_map[NUM_FD];
