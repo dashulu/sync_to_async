@@ -137,8 +137,7 @@ typedef struct {
         int          flags;
 } posix_xattr_filler_t;
 
-int nilfs_fd;
-uint64_t nilfs_offset;
+
 
 
 #define POSIX_BASE_PATH(this) (((struct posix_private *)this->private)->base_path)

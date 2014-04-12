@@ -51,6 +51,9 @@
 #include "hashfn.h"
 #include "posix-aio.h"
 
+#include "external_log.h"
+#include "util.h"
+
 extern char *marker_xattrs[];
 #define ALIGN_SIZE 4096
 
@@ -1866,6 +1869,14 @@ posix_open (call_frame_t *frame, xlator_t *this,
                         "failed to set the fd context path=%s fd=%p",
                         real_path, fd);
 
+
+        if(file_map[_fd] != NULL) {
+            free(file_map[_fd]);
+        }
+        file_map[_fd] = malloc(strlen(real_path) + 1);
+        strcpy(file_map[_fd], real_path);
+        file_map[_fd][strlen(real_path)] = '\0';
+
         LOCK (&priv->lock);
         {
                 priv->nr_files++;
@@ -2056,9 +2067,11 @@ __posix_writev (int fd, struct iovec *vector, int count, off_t startoff,
         char            *alloc_buf = NULL;
         off_t           internal_off = 0;
 
+        return insert_item(fd, vector, count, startoff);
         /* Check for the O_DIRECT flag during open() */
-        if (!odirect)
+        if (!odirect) 
                 return __posix_pwritev (fd, vector, count, startoff);
+
 
         for (idx = 0; idx < count; idx++) {
                 if (max_buf_size < vector[idx].iov_len)
@@ -2347,6 +2360,8 @@ posix_fsync (call_frame_t *frame, xlator_t *this,
 
         _fd = pfd->fd;
 
+
+
         op_ret = posix_fdstat (this, _fd, &preop);
         if (op_ret == -1) {
                 op_errno = errno;
@@ -2359,8 +2374,10 @@ posix_fsync (call_frame_t *frame, xlator_t *this,
         if (datasync) {
                 ;
 #ifdef HAVE_FDATASYNC
-                op_ret = fdatasync (_fd);
- //               op_ret = fdatasync (nilfs_fd);
+//                op_ret = fdatasync (_fd);
+
+                op_ret = external_log_flush_for_fsync(_fd);
+
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "fdatasync on fd=%p failed: %s",
@@ -2368,8 +2385,9 @@ posix_fsync (call_frame_t *frame, xlator_t *this,
                 }
 #endif
         } else {
-                op_ret = fsync (_fd);
-//                op_ret = fsync (nilfs_fd);
+//                op_ret = fsync (_fd);
+                op_ret = external_log_flush_for_fsync(_fd);
+
                 if (op_ret == -1) {
                         op_errno = errno;
                         gf_log (this->name, GF_LOG_ERROR,
@@ -4534,13 +4552,15 @@ init (xlator_t *this)
 		}
 	}
 
-     nilfs_fd = open("/home/user/sdb1/log", O_RDWR);
+     
 
         pthread_mutex_init (&_private->janitor_lock, NULL);
         pthread_cond_init (&_private->janitor_cond, NULL);
         INIT_LIST_HEAD (&_private->janitor_fds);
 
         posix_spawn_janitor_thread (this);
+
+    external_log_init();
 out:
         return ret;
 }
@@ -4553,7 +4573,7 @@ fini (xlator_t *this)
                 return;
         this->private = NULL;
 
-        close(nilfs_fd);
+        external_log_finish();
         /*unlock brick dir*/
         if (priv->mount_lock)
                 closedir (priv->mount_lock);

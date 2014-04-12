@@ -22,10 +22,34 @@ int external_log_init() {
 	}
 
 	pthread_mutex_init(&file_map_lock, NULL);
+	pthread_mutex_init(&external_log_id_lock, NULL);
+	pthread_mutex_init(&external_log_offset_lock, NULL);
+	
+	external_log_fd = open("/home/user/sdb1/log", O_RDWR);
+	external_log_offset = 0;
+
+	return 0;
 }
 
 int external_log_finish() {
+	int i,j;
 
+	for(i = 0;i < HASH_ITEM_NUM;i++) {
+		if(hashtable[i] != NULL) {
+			destroy_hash_item(hashtable[i]);
+		}
+		pthread_mutex_destroy(&hashtable_locks[i]); 
+	}
+
+	for(i = 0;i < NUM_FD;i++) {
+		free(file_map[i]);
+	}
+	pthread_mutex_destroy(&file_map_lock);
+	pthread_mutex_destroy(&external_log_id_lock);
+	pthread_mutex_destroy(&external_log_offset_lock);
+
+	close(external_log_fd);
+	return 0;
 }
 
 int merge_iovec(struct cache_item** cache, struct iovec* vec, int count, uint32_t offset) {
@@ -48,7 +72,7 @@ int merge_iovec(struct cache_item** cache, struct iovec* vec, int count, uint32_
 		memcpy((*cache)->data + internal_offset, vec[i].iov_base, vec[i].iov_len);
 		internal_offset += vec[i].iov_len;
 	}
-
+	return internal_offset;
 }
 
 
@@ -135,6 +159,7 @@ int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 	int hash_value;
 	char* filename;
 	int i;
+	int ret;
 	struct hash_item** p;
 	struct hash_item* q;
 	struct cache_item* tmp;
@@ -151,7 +176,7 @@ int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 	}
 	pthread_mutex_unlock (&file_map_lock);
 
-	merge_iovec(&tmp, vec, count, offset);
+	ret = merge_iovec(&tmp, vec, count, offset);
 
 	hash_value = external_log_hash(filename, HASH_ITEM_NUM);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
@@ -161,6 +186,7 @@ int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 			(*p) = malloc(sizeof(struct hash_item));
 			(*p)->pathname = malloc(strlen(filename) + 1);
 			strcpy((*p)->pathname, filename);
+			(*p)->pathname[strlen(filename)] = '\0';
 			(*p)->next = NULL;
 			(*p)->head = tmp;
 			break;
@@ -172,7 +198,117 @@ int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 		p = &((*p)->next);
 	}
 	pthread_mutex_unlock(&hashtable_locks[hash_value]);
+	return ret;
 }
+
+int external_log_flush(struct hash_item* item) {
+	int item_num;
+	uint32_t size;
+	struct cache_item* p;
+	uint64_t offset;
+	char* desc;
+	char* data;
+	char* commit;
+	char* desc_p;
+	char* data_p;
+	char* commit_p;
+	uint32_t desc_size;
+
+	if(item == NULL)
+		return;
+
+	item_num = 0;
+	size = 0;
+	p = item->head;
+	while(p != NULL) {
+		item_num++;
+		size += p->size;
+		p = p->next;
+	}
+
+	desc_size = sizeof(struct descriptor_block) + 
+			strlen(item->pathname) + item_num*(sizeof(struct record_item));
+	desc = malloc(desc_size);
+	data = malloc(size);
+	commit = malloc(sizeof(struct commit_block));
+
+	pthread_mutex_lock(&external_log_offset_lock);
+	offset = external_log_offset;
+	external_log_offset += UPPER(desc, BLOCK_SIZE) + UPPER(size, BLOCK_SIZE) + BLOCK_SIZE;	
+	pthread_mutex_unlock(&external_log_offset_lock);
+
+	*((uint32_t*) desc) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
+	desc_p = desc + sizeof(uint32_t);
+	*((uint32_t*) commit) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
+	commit_p += sizeof(uint32_t);
+	pthread_mutex_lock(&external_log_id_lock);
+	*((uint64_t*) desc_p) = external_log_id;
+	*((uint64_t*) commit_p) = external_log_id;
+	pthread_mutex_unlock(&external_log_id_lock);
+	desc_p += sizeof(uint64_t);
+	*((int *) desc_p) = item_num;
+	desc_p += sizeof(int);
+	*((int *) desc_p) = strlen(item->pathname);
+	desc_p += sizeof(int);
+	strcmp(desc_p, item->pathname);
+	desc_p += strlen(item->pathname);
+
+	p = item->head;
+	data_p = data;
+	while(p != NULL) {
+		*((uint32_t*) desc_p) = p->size;
+		*((uint32_t*) (desc_p +１)) = p->offset;
+		desc_p += sizeof(struct record_item);
+		memcpy(data_p, p->data, p->size);
+		data_p += p->size;
+	}
+
+	pwrite(external_log_fd, desc, desc_size, offset);
+	pwrite(external_log_fd, data, size, offset + UPPER(desc_size, BLOCK_SIZE));
+	pwrite(external_log_fd, commit, sizeof(struct commit_block), 
+			offset + UPPER(desc_size, BLOCK_SIZE) + UPPER(size, BLOCK_SIZE));
+	ret = fsync(external_log_fd);
+
+	if(ret < 0)
+		goto out;
+
+	p = item->head;
+	int fd;
+	fd = open(item->pathname, O_WRONLY);
+	if(fd > 0) {
+		while(p != NULL) {
+			pwrite(fd, p->data, p->size, p->offset);
+			p = p->next;
+		}
+	}
+
+out:
+	free(data);
+	free(commit);
+	free(desc);
+	return ret;
+}
+
+int external_log_flush_for_fsync(int fd) {
+	int ret = -1;
+	int hash_value;
+	struct hash_item* item;
+
+	hash_value = external_log_hash(file_map[fd], HASH_ITEM_NUM);
+	pthread_mutex_lock(&hashtable_locks[hash_value]);
+	item = hashtable[hash_value];
+	while(item != NULL) {
+		if(!strcmp(item->pathname, file_map[fd])) {
+			ret = external_log_flush(item);
+			break;
+		}
+		item = item->next;
+	}
+	pthread_mutex_unlock(&hashtable_locks[hash_value]);
+	return ret;
+}
+
+
 
 static struct iovec* get_iovec(int count, char flag) {
 	struct iovec* vec;
@@ -355,7 +491,15 @@ void insert_item_test() {
 	vec = get_iovec(5, 'k');
 	insert_item(0, vec, 5, 2995);
 	free_iovec(vec, 5);
+}
 
+void fsync_test() {
+	int i;
+
+	for(i = 0;i < HASH_ITEM_NUM;i++) {
+		if(hashtable[i] != NULL)
+			external_log_flush(hashtable[i]);
+	}
 }
 
 int main() {

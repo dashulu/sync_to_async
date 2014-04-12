@@ -11,16 +11,16 @@ struct record_item {
 //	uint32_t begin;  // the begin of data for this item in the log file;
 	uint32_t size;	// size of this data
 	uint32_t offset;	// the place that data needs to write;
-	char	substitute_flag; // if the first 4 byte is the same to sig, it will be substitute by 0x0000;
+//	char	substitute_flag; // if the first 4 byte is the same to sig, it will be substitute by 0x0000;
 };
 
 struct descriptor_block {
 	uint32_t sig;
 	uint64_t id;
-	int path_size;
-	char* path;
 	int num_of_item;
-	struct record_item* items;
+	int path_size;
+//	char* pathname;
+//	struct record_item* items;
 };
 
 struct commit_block {
@@ -63,10 +63,20 @@ struct hash_item {
 
 #define NUM_FD 1024
 #define HASH_ITEM_NUM 10
+#define EXTERNAL_LOG_METADATA_BLOCK_SIG 0xbeefbeef
+#define BLOCK_SIZE 4096
+
 
 // a map from fd to the path of file. fd is the index;
 char* file_map[NUM_FD];
 pthread_mutex_t file_map_lock;
+
+int external_log_fd;
+uint64_t external_log_offset;
+pthread_mutex_t external_log_offset_lock;
+
+int external_log_id;
+pthread_mutex_t external_log_id_lock;
 
 struct hash_item* hashtable[HASH_ITEM_NUM];
 pthread_mutex_t hashtable_locks[HASH_ITEM_NUM];
