@@ -1955,14 +1955,14 @@ posix_readv (call_frame_t *frame, xlator_t *this,
 
         external_log_read(_fd, &record, size, offset);
         if(record == NULL) {
- //           op_ret = pread (_fd, iobuf->ptr, size, offset);
+            op_ret = pread (_fd, iobuf->ptr, size, offset);
         } else {
             if(record->size == size) {
                 memcpy(iobuf->ptr, record->data, size);
                 free(record->data);
                 free(record);
             } else {
-//                op_ret = pread (_fd, iobuf->ptr, size, offset);
+                op_ret = pread (_fd, iobuf->ptr, size, offset);
                 struct read_record* tmp;
                 int external_log_offset = 0;
                 while(record != NULL) {

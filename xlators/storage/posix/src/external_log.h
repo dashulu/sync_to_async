@@ -74,7 +74,7 @@ struct hash_item {
 //	spinlock_t  hash_lock = SPIN_LOCK_UNLOCKED; 
 };
 
-#define NUM_FD 1024
+#define NUM_FD 2048
 #define HASH_ITEM_NUM 4099
 #define EXTERNAL_LOG_METADATA_BLOCK_SIG 0xbeefbeef
 #define BLOCK_SIZE 4096
