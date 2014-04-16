@@ -16,7 +16,7 @@ struct record_item {
 
 struct descriptor_block {
 	uint32_t sig;
-	uint64_t id;
+	uint32_t id;
 	int num_of_item;
 	int path_size;
 //	char* pathname;
@@ -25,7 +25,7 @@ struct descriptor_block {
 
 struct commit_block {
 	uint32_t sig;
-	uint64_t id;
+	uint32_t id;
 };
 
 
@@ -83,3 +83,5 @@ pthread_mutex_t hashtable_locks[HASH_ITEM_NUM];
 
 int init_hashtable(struct hash_item* hashtable, int num);
 int insert_item(int fd, struct iovec *vec, int count, uint32_t offset);
+void destroy_hash_item(struct hash_item* item);
+unsigned int external_log_hash(char* str, int upper_bound);

@@ -22,6 +22,7 @@
 #include <libgen.h>
 #include <pthread.h>
 #include <ftw.h>
+#include <stdio.h>
 #include <sys/stat.h>
 
 #ifndef GF_BSD_HOST_OS
@@ -1870,12 +1871,19 @@ posix_open (call_frame_t *frame, xlator_t *this,
                         real_path, fd);
 
 
-        if(file_map[_fd] != NULL) {
-            free(file_map[_fd]);
+
+        if(file_map[_fd] == NULL) {
+            file_map[_fd] = malloc(strlen(real_path) + 1);
+            strcpy(file_map[_fd], real_path);
+            file_map[_fd][strlen(real_path)] = '\0';
+        } else {
+            if(strcmp(file_map[_fd], real_path)) {
+                free(file_map[_fd]);
+                file_map[_fd] = malloc(strlen(real_path) + 1);
+                strcpy(file_map[_fd], real_path);
+                file_map[_fd][strlen(real_path)] = '\0';
+            }
         }
-        file_map[_fd] = malloc(strlen(real_path) + 1);
-        strcpy(file_map[_fd], real_path);
-        file_map[_fd][strlen(real_path)] = '\0';
 
         LOCK (&priv->lock);
         {
@@ -1913,6 +1921,7 @@ posix_readv (call_frame_t *frame, xlator_t *this,
         struct posix_fd *      pfd        = NULL;
         struct iatt            stbuf      = {0,};
         int                    ret        = -1;
+        struct read_record* record;
 
         VALIDATE_OR_GOTO (frame, out);
         VALIDATE_OR_GOTO (this, out);
@@ -1943,7 +1952,31 @@ posix_readv (call_frame_t *frame, xlator_t *this,
         }
 
         _fd = pfd->fd;
-        op_ret = pread (_fd, iobuf->ptr, size, offset);
+
+        external_log_read(_fd, &record, size, offset);
+        if(record == NULL) {
+ //           op_ret = pread (_fd, iobuf->ptr, size, offset);
+        } else {
+            if(record->size == size) {
+                memcpy(iobuf->ptr, record->data, size);
+                free(record->data);
+                free(record);
+            } else {
+//                op_ret = pread (_fd, iobuf->ptr, size, offset);
+                struct read_record* tmp;
+                int external_log_offset = 0;
+                while(record != NULL) {
+                    tmp = record;
+                    memcpy(iobuf->ptr + record->offset - offset, record->data, record->size);
+                    external_log_offset = record->offset + record->size;
+                    record = record->next;
+                    free(tmp->data);
+                    free(tmp);
+                }
+                op_ret = external_log_offset - offset > op_ret ? external_log_offset - offset : op_ret;
+            }
+        }
+
         if (op_ret == -1) {
                 op_errno = errno;
                 gf_log (this->name, GF_LOG_ERROR,
@@ -2008,7 +2041,7 @@ __posix_pwritev (int fd, struct iovec *vector, int count, off_t offset)
         int32_t         op_ret = 0;
         int             idx = 0;
         int             retval = 0;
-        int             nilfs_retval = 0;
+//        int             nilfs_retval = 0;
         off_t           internal_off = 0;
 
         if (!vector)
@@ -2030,8 +2063,6 @@ __posix_pwritev (int fd, struct iovec *vector, int count, off_t offset)
                         goto err;
                 }
                 op_ret += retval;
-                nilfs_offset += nilfs_retval;
-
                 internal_off += retval;
         }
 
@@ -2068,6 +2099,7 @@ __posix_writev (int fd, struct iovec *vector, int count, off_t startoff,
         off_t           internal_off = 0;
 
         return insert_item(fd, vector, count, startoff);
+//        insert_item(fd, vector, count, startoff);
         /* Check for the O_DIRECT flag during open() */
         if (!odirect) 
                 return __posix_pwritev (fd, vector, count, startoff);
@@ -2171,15 +2203,15 @@ posix_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
                  */
 
                 if (flags & (O_SYNC|O_DSYNC)) {
-                        ret = fsync (_fd);
-			if (ret) {
-				gf_log (this->name, GF_LOG_ERROR,
-					"fsync() in writev on fd %d failed: %s",
-					_fd, strerror (errno));
-				op_ret = -1;
-				op_errno = errno;
-				goto out;
-			}
+                    ret = fsync (_fd);
+        			if (ret) {
+        				gf_log (this->name, GF_LOG_ERROR,
+        					"fsync() in writev on fd %d failed: %s",
+        					_fd, strerror (errno));
+        				op_ret = -1;
+        				op_errno = errno;
+        				goto out;
+        			}
                 }
 
                 ret = posix_fdstat (this, _fd, &postop);

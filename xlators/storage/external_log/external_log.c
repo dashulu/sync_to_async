@@ -3,8 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include "util.h"
 #include "external_log.h"
@@ -25,7 +27,11 @@ int external_log_init() {
 	pthread_mutex_init(&external_log_id_lock, NULL);
 	pthread_mutex_init(&external_log_offset_lock, NULL);
 	
-	external_log_fd = open("/home/user/sdb1/log", O_RDWR);
+	external_log_fd = open("/home/dashu/external_log", O_RDWR);
+	if(external_log_fd <= 0) {
+		printf("open failed\n");
+		exit(0);
+	}
 	external_log_offset = 0;
 
 	return 0;
@@ -153,6 +159,19 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 	}
 }
 
+unsigned int external_log_hash(char* str, int upper_bound) {
+	unsigned int h;
+	unsigned char *p;
+
+	if(!str)
+		return 0;
+
+	for(h = 0,p = (unsigned char *) str;*p; p++)
+		h = 31 * h + *p;
+
+	return h % upper_bound;
+}
+
 
 
 int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
@@ -213,6 +232,7 @@ int external_log_flush(struct hash_item* item) {
 	char* data_p;
 	char* commit_p;
 	uint32_t desc_size;
+	int ret;
 
 	if(item == NULL)
 		return;
@@ -234,33 +254,37 @@ int external_log_flush(struct hash_item* item) {
 
 	pthread_mutex_lock(&external_log_offset_lock);
 	offset = external_log_offset;
-	external_log_offset += UPPER(desc, BLOCK_SIZE) + UPPER(size, BLOCK_SIZE) + BLOCK_SIZE;	
+	external_log_offset += UPPER(desc_size, BLOCK_SIZE) + UPPER(size, BLOCK_SIZE) + BLOCK_SIZE;	
 	pthread_mutex_unlock(&external_log_offset_lock);
 
 	*((uint32_t*) desc) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
 	desc_p = desc + sizeof(uint32_t);
 	*((uint32_t*) commit) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
-	commit_p += sizeof(uint32_t);
+	commit_p = commit + sizeof(uint32_t);
 	pthread_mutex_lock(&external_log_id_lock);
-	*((uint64_t*) desc_p) = external_log_id;
-	*((uint64_t*) commit_p) = external_log_id;
+	*((uint32_t*) desc_p) = external_log_id;
+	*((uint32_t*) commit_p) = external_log_id;
+	external_log_id++;
 	pthread_mutex_unlock(&external_log_id_lock);
-	desc_p += sizeof(uint64_t);
+	desc_p += sizeof(uint32_t);
 	*((int *) desc_p) = item_num;
 	desc_p += sizeof(int);
 	*((int *) desc_p) = strlen(item->pathname);
 	desc_p += sizeof(int);
-	strcmp(desc_p, item->pathname);
+	memcpy(desc_p, item->pathname, strlen(item->pathname));
 	desc_p += strlen(item->pathname);
+
 
 	p = item->head;
 	data_p = data;
 	while(p != NULL) {
 		*((uint32_t*) desc_p) = p->size;
-		*((uint32_t*) (desc_p +１)) = p->offset;
-		desc_p += sizeof(struct record_item);
+		desc_p += sizeof(uint32_t);
+		*((uint32_t*) desc_p) = p->offset;
+		desc_p += sizeof(uint32_t);
 		memcpy(data_p, p->data, p->size);
 		data_p += p->size;
+		p = p->next;
 	}
 
 	pwrite(external_log_fd, desc, desc_size, offset);
@@ -374,6 +398,15 @@ static int external_log_init_for_test() {
 	}
 
 	pthread_mutex_init(&file_map_lock, NULL);
+	pthread_mutex_init(&external_log_id_lock, NULL);
+	pthread_mutex_init(&external_log_offset_lock, NULL);
+	
+	external_log_fd = open("/home/dashu/external_log", O_RDWR);
+	if(external_log_fd <= 0) {
+		printf("open failed\n");
+		exit(0);
+	}
+	external_log_offset = 0;
 }
 
 void destroy_cache_item(struct cache_item* item) {
@@ -455,19 +488,19 @@ void insert_item_test() {
 	free_iovec(vec, 4);
 
 	vec = get_iovec(4, 'b');
-	insert_item(0, vec, 4, 0);
+	insert_item(1, vec, 4, 0);
 	free_iovec(vec, 4);
 
 	vec = get_iovec(4, 'c');
-	insert_item(0, vec, 4, 1000);
+	insert_item(2, vec, 4, 1000);
 	free_iovec(vec, 4);
 
 	vec = get_iovec(4, 'd');
-	insert_item(0, vec, 4, 95);
+	insert_item(2, vec, 4, 95);
 	free_iovec(vec, 4);
 
 	vec = get_iovec(4, 'e');
-	insert_item(0, vec, 4, 5);
+	insert_item(1, vec, 4, 5);
 	free_iovec(vec, 4);
 
 	vec = get_iovec(6, 'f');
@@ -502,11 +535,58 @@ void fsync_test() {
 	}
 }
 
+void show_log_content() {
+	int fd;
+	struct descriptor_block* d;
+	struct record_item* item;
+	struct commit_block* c;
+	char desc[BLOCK_SIZE];
+	char data[BLOCK_SIZE];
+	char commit[BLOCK_SIZE];
+	char* pathname;
+	char* desc_p = desc + sizeof(struct descriptor_block);
+	char* data_p = data;
+	int i;
+
+	fd = open("/home/dashu/external_log", O_RDWR);
+	read(fd, desc, BLOCK_SIZE);
+	read(fd, data, BLOCK_SIZE);
+	read(fd, commit, BLOCK_SIZE);
+	d = (struct descriptor_block*) desc;
+
+	while(d->sig == EXTERNAL_LOG_METADATA_BLOCK_SIG) {
+		desc_p = desc + sizeof(struct descriptor_block);
+		c = (struct commit_block*) commit;
+		pathname = malloc(d->path_size + 1);
+		memcpy(pathname, desc_p, d->path_size);
+		pathname[d->path_size] = '\0';
+		desc_p += d->path_size;
+		printf("pathname:%s sig:%u id:%lu num_of_item:%d path_size:%d\n", 
+			pathname, d->sig, d->id, d->num_of_item, d->path_size);
+		item = (struct record_item*)desc_p;
+		for(i = 0;i < d->num_of_item;i++) {
+			printf("size:%u offset:%u\n", item->size, item->offset);
+			item++;
+		}
+		printf("data:%s\n", data);
+		printf("commit:%u id:%lu\n", c->sig, c->id);
+		if(read(fd, desc, BLOCK_SIZE) <=0 || read(fd, data, BLOCK_SIZE) <= 0 ||
+			read(fd, commit, BLOCK_SIZE) <= 0) {
+			break;
+		}
+		free(pathname);
+		d = (struct descriptor_block*) desc;
+	}
+
+}
+
 int main() {
 	external_log_init_for_test();
 	insert_item_test();
 
 	traversal_hashtable();
-
+	fsync_test();
+	show_log_content();
 	external_log_finish_for_test();
+	
 }

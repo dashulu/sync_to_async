@@ -76,7 +76,7 @@ posix_la_DEPENDENCIES =  \
 	$(top_builddir)/libglusterfs/src/libglusterfs.la \
 	$(am__DEPENDENCIES_1)
 am_posix_la_OBJECTS = posix.lo posix-helpers.lo posix-handle.lo \
-	posix-aio.lo
+	posix-aio.lo external_log.lo util.lo
 posix_la_OBJECTS = $(am_posix_la_OBJECTS)
 AM_V_lt = $(am__v_lt_$(V))
 am__v_lt_ = $(am__v_lt_$(AM_DEFAULT_VERBOSITY))
@@ -287,9 +287,9 @@ top_srcdir = @top_srcdir@
 xlator_LTLIBRARIES = posix.la
 xlatordir = $(libdir)/glusterfs/$(PACKAGE_VERSION)/xlator/storage
 posix_la_LDFLAGS = -module -avoid-version
-posix_la_SOURCES = posix.c posix-helpers.c posix-handle.c posix-aio.c
+posix_la_SOURCES = posix.c posix-helpers.c posix-handle.c posix-aio.c external_log.c util.c
 posix_la_LIBADD = $(top_builddir)/libglusterfs/src/libglusterfs.la $(LIBAIO)
-noinst_HEADERS = posix.h posix-mem-types.h posix-handle.h posix-aio.h
+noinst_HEADERS = posix.h posix-mem-types.h posix-handle.h posix-aio.h external_log.h util.h
 AM_CPPFLAGS = $(GF_CPPFLAGS) -I$(top_srcdir)/libglusterfs/src \
             -I$(top_srcdir)/rpc/xdr/src \
             -I$(top_srcdir)/rpc/rpc-lib/src

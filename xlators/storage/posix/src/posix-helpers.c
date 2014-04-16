@@ -45,6 +45,7 @@
 #include "glusterfs3-xdr.h"
 #include "hashfn.h"
 #include <fnmatch.h>
+#include "external_log.h"
 
 char *marker_xattrs[] = {"trusted.glusterfs.quota.*",
                          "trusted.glusterfs.*.xtime",
@@ -276,16 +277,29 @@ out:
         return;
 }
 
+
 int
 posix_fdstat (xlator_t *this, int fd, struct iatt *stbuf_p)
 {
         int                    ret     = 0;
         struct stat            fstatbuf = {0, };
         struct iatt            stbuf = {0, };
+        struct hash_item* item;
 
         ret = fstat (fd, &fstatbuf);
         if (ret == -1)
                 goto out;
+
+        item = get_hash_item(fd);
+        if(item != NULL) {
+            if(item->size == -1) {
+                item->size = fstatbuf.st_size;
+                item->blocks = fstatbuf.st_blocks;
+            } else {
+                fstatbuf.st_size = item->size;
+                fstatbuf.st_blocks = item->blocks;
+            }
+        }
 
         if (fstatbuf.st_nlink && !S_ISDIR (fstatbuf.st_mode))
                 fstatbuf.st_nlink--;
@@ -315,6 +329,7 @@ posix_istat (xlator_t *this, uuid_t gfid, const char *basename,
         struct iatt  stbuf = {0, };
         int          ret = 0;
         struct posix_private *priv = NULL;
+        struct hash_item* item;
 
 
         priv = this->private;
@@ -322,6 +337,24 @@ posix_istat (xlator_t *this, uuid_t gfid, const char *basename,
         MAKE_HANDLE_PATH (real_path, this, gfid, basename);
 
         ret = lstat (real_path, &lstatbuf);
+
+        int hash_value = external_log_hash(real_path, HASH_ITEM_NUM);
+        item = hashtable[hash_value];
+        while(item != NULL) {
+            if(!strcmp(item->pathname, real_path)) {
+                break;
+            }
+            item = item->next;
+        }
+        if(item != NULL) {
+            if(item->size == -1) {
+                item->size = lstatbuf.st_size;
+                item->blocks = lstatbuf.st_blocks;
+            } else {
+                lstatbuf.st_size = item->size;
+                lstatbuf.st_blocks = item->blocks;
+            }
+        }
 
         if (ret != 0) {
                 if (ret == -1) {
@@ -376,10 +409,32 @@ posix_pstat (xlator_t *this, uuid_t gfid, const char *path,
         int          ret = 0;
         struct posix_private *priv = NULL;
 
+        struct hash_item* item;
+
 
         priv = this->private;
 
         ret = lstat (path, &lstatbuf);
+
+        int hash_value = external_log_hash(path, HASH_ITEM_NUM);
+        item = hashtable[hash_value];
+        while(item != NULL) {
+            if(!strcmp(item->pathname, path)) {
+                break;
+            }
+            item = item->next;
+        }
+        if(item != NULL) {
+            if(item->size == -1) {
+                item->size = lstatbuf.st_size;
+                item->blocks = lstatbuf.st_blocks;
+            } else {
+                lstatbuf.st_size = item->size;
+                lstatbuf.st_blocks = item->blocks;
+            }
+        }
+
+
 
         if (ret != 0) {
                 if (ret == -1) {
