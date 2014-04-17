@@ -29,7 +29,7 @@ int external_log_init() {
 	pthread_mutex_init(&external_log_id_lock, NULL);
 	pthread_mutex_init(&external_log_offset_lock, NULL);
 	
-	external_log_fd = open("/home/dashu/external_log", O_RDWR);
+	external_log_fd = open("/home/user/sdb1/external_log", O_RDWR);
 	if(external_log_fd <= 0) {
 		printf("open failed\n");
 		exit(0);

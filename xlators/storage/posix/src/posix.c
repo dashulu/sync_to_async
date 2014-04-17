@@ -1713,6 +1713,8 @@ posix_create (call_frame_t *frame, xlator_t *this,
 
         _fd = open (real_path, _flags, mode);
 
+
+
         if (_fd == -1) {
                 op_errno = errno;
                 op_ret = -1;
@@ -1720,6 +1722,19 @@ posix_create (call_frame_t *frame, xlator_t *this,
                         "open on %s failed: %s", real_path,
                         strerror (op_errno));
                 goto out;
+        }
+
+        if(file_map[_fd] == NULL) {
+            file_map[_fd] = malloc(strlen(real_path) + 1);
+            strcpy(file_map[_fd], real_path);
+            file_map[_fd][strlen(real_path)] = '\0';
+        } else {
+            if(strcmp(file_map[_fd], real_path)) {
+                free(file_map[_fd]);
+                file_map[_fd] = malloc(strlen(real_path) + 1);
+                strcpy(file_map[_fd], real_path);
+                file_map[_fd][strlen(real_path)] = '\0';
+            }
         }
 
         if (was_present)
