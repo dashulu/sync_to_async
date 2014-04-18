@@ -8,11 +8,37 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <time.h>
 #include "util.h"
 #include "external_log.h"
 
+
+void *background_flush_thread(void* obj) {
+	int i = 0;
+	time_t current_time;
+
+	while(true) {
+		time(&current_time);
+		for(i = 0;i < HASH_ITEM_NUM;i++) {
+			p = hashtable[i];
+			while(p != NULL) {
+				if(current_time - p.mtime >= 5) {
+					pthread_mutext_lock(&hashtable_locks[i]);
+					external_log_flush(p);
+					pthread_mutext_unlock(&hashtable_locks[i]);
+				}
+				p = p->next;
+			}
+		}
+		sleep(1);
+	}
+
+}
+
+
 int external_log_init() {
 	int i;
+	
 
 	for(i = 0;i < HASH_ITEM_NUM;i++) {
 		hashtable[i] = NULL;
@@ -33,6 +59,8 @@ int external_log_init() {
 		exit(0);
 	}
 	external_log_offset = 0;
+
+	pthread_create(&background_pid, NULL, background_flush_thread,"flush");
 
 	return 0;
 }
@@ -55,6 +83,7 @@ int external_log_finish() {
 	pthread_mutex_destroy(&external_log_offset_lock);
 
 	close(external_log_fd);
+	pthread_cancel(pid);
 	return 0;
 }
 
@@ -152,6 +181,7 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 		free(data);
 	} else if(a1 <= b1 && b2 <= a2) {
 		memcpy((*head)->data + b1 - a1, data->data, b2 - b1);
+		(*head)->is_dirty = 1;
 		free(data->data);
 		free(data);
 	} else {
@@ -208,9 +238,13 @@ int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 			(*p)->pathname[strlen(filename)] = '\0';
 			(*p)->next = NULL;
 			(*p)->head = tmp;
+			(*p)->is_dirty = 1;
+			time(&((*p)->mtime));
 			break;
 		}
 		if(!strcmp(filename, (*p)->pathname)) {
+			(*p)->is_dirty = 1;
+			time(&((*p)->mtime));
 			insert_cache_item(&((*p)->head), tmp);
 			break;
 		}
@@ -278,12 +312,15 @@ int external_log_flush(struct hash_item* item) {
 	p = item->head;
 	data_p = data;
 	while(p != NULL) {
-		*((uint32_t*) desc_p) = p->size;
-		desc_p += sizeof(uint32_t);
-		*((uint32_t*) desc_p) = p->offset;
-		desc_p += sizeof(uint32_t);
-		memcpy(data_p, p->data, p->size);
-		data_p += p->size;
+		if(p->is_dirty) {
+			*((uint32_t*) desc_p) = p->size;
+			desc_p += sizeof(uint32_t);
+			*((uint32_t*) desc_p) = p->offset;
+			desc_p += sizeof(uint32_t);
+			memcpy(data_p, p->data, p->size);
+			data_p += p->size;
+		//	p->is_dirty = 2;
+		}
 		p = p->next;
 	}
 
@@ -301,10 +338,15 @@ int external_log_flush(struct hash_item* item) {
 	fd = open(item->pathname, O_WRONLY);
 	if(fd > 0) {
 		while(p != NULL) {
-			pwrite(fd, p->data, p->size, p->offset);
+			if(p->is_dirty) {
+				pwrite(fd, p->data, p->size, p->offset);
+				p->is_dirty = 0;
+			}
 			p = p->next;
 		}
 	}
+
+	item->is_dirty = 0;
 
 out:
 	free(data);

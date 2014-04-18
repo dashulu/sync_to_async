@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
 
 
 // log structure in the disk
@@ -54,10 +55,11 @@ struct cache_item {
 struct hash_item {
 	char* pathname;
 //	pthread_mutex_t lock;
-//	bool is_dirty;
+	bool is_dirty;
 //	bool is_busy; // for write behind thread, if busy flag is true, it means some thread are read/write the file
 	struct hash_item *next;
 	struct cache_item *head;
+	uint64_t mtime;
 //	spinlock_t  hash_lock = SPIN_LOCK_UNLOCKED; 
 };
 
@@ -72,7 +74,7 @@ char* file_map[NUM_FD];
 pthread_mutex_t file_map_lock;
 
 int external_log_fd;
-uint64_t external_log_offset;
+time_t external_log_offset;
 pthread_mutex_t external_log_offset_lock;
 
 int external_log_id;
@@ -80,6 +82,9 @@ pthread_mutex_t external_log_id_lock;
 
 struct hash_item* hashtable[HASH_ITEM_NUM];
 pthread_mutex_t hashtable_locks[HASH_ITEM_NUM];
+
+pthread_t background_pid;
+
 
 int init_hashtable(struct hash_item* hashtable, int num);
 int insert_item(int fd, struct iovec *vec, int count, uint32_t offset);
