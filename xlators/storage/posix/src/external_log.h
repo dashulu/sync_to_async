@@ -36,6 +36,7 @@ struct descriptor_block {
 struct commit_block {
 	uint32_t sig;
 	uint32_t id;
+	uint32_t checksum;
 };
 
 

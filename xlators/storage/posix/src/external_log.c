@@ -11,7 +11,7 @@
 #include "util.h"
 #include "external_log.h"
 
-int external_log_flush(struct hash_item* item);
+int external_log_flush(struct hash_item* item, pthread_mutext lock);
 
 int external_log_init() {
 	int i;
@@ -41,14 +41,19 @@ int external_log_init() {
 
 int external_log_finish() {
 	int i;
+	pthread_mutex_t tmp;
+
+	pthread_mutex_init(&tmp, NULL);
 
 	for(i = 0;i < HASH_ITEM_NUM;i++) {
 		if(hashtable[i] != NULL) {
-			external_log_flush(hashtable[i]);
+			pthread_mutex_lock(&tmp);
+			external_log_flush(hashtable[i], tmp);
 			destroy_hash_item(hashtable[i]);
 		}
 		pthread_mutex_destroy(&hashtable_locks[i]); 
 	}
+	pthread_mutex_destroy(&tmp);
 
 	for(i = 0;i < NUM_FD;i++) {
 		free(file_map[i]);
@@ -350,34 +355,79 @@ int external_log_read(int fd, struct read_record** record, uint32_t size, uint32
 
 void *write_to_real_path(void* item) {
 	struct cache_item* p;
-	p = ((struct hash_item*)item)->head;
+	struct descriptor_block* desc = (struct descriptor_block*)item;
+	char* filename;
+	char* data;
+	struct record_item* records;
+	int i; 
+	struct hash_item* h_item;
+	struct cache_item* head;
+	struct cache_item* next;
+
+	filename = malloc(desc->path_size + 1);
+	memcpy(filename, (char*) item + sizeof(struct descriptor_block), desc->path_size);
+	filename[desc->path_size] = '\0';
+	records = (struct record_item)((char*)item + sizeof(struct descriptor_block) + desc->path_size);
+	data = (char*) records + desc->num_of_item*sizeof(struct record_item);
+
 	int fd;
-	fd = open(((struct hash_item*)item)->pathname, O_WRONLY);
+	fd = open(filename, O_WRONLY);
 	if(fd > 0) {
-		while(p != NULL) {
-			if(p->is_dirty) {
-				pwrite(fd, p->data, p->size, p->offset);
-				p->is_dirty = 0;
-			}
-			p = p->next;
+		for(i = 0;i < desc->num_of_item;i++) {
+			pwrite(fd, data, records[i].size, records[i].offset);
+			data += records[i].size;
 		}
 	}
+
+	int hash_value = external_log_hash(filename, HASH_ITEM_NUM);
+	pthread_mutex_lock(&hashtable_locks[hash_value]);
+	h_item = hashtable[hash_value];
+	while(h_item != NULL) {
+		if(!strcmp(item->pathname, file_map[fd])) {
+			head = h_item->head;
+			if(head == NULL) {
+				break;
+			}
+			next = head->next;
+			for(i = 0;i < desc->num_of_item;i++) {
+				while(next != NULL && next->offset < desc->offset) {
+					head = head->next;
+					next = next->next;
+				}
+				if(next == NULL) {
+					break;
+				}
+				if(next->offset == desc->offset && next->size == desc->size) {
+					head->next = next->next;
+					free(next->data);
+					free(next);
+					next = head->next;
+				}
+			}
+			break;
+		}
+		item = item->next;
+	}
+	pthread_mutex_unlock(&hashtable_locks[hash_value]);
+	free((char*) item);
+	free(filename);
 	return NULL;
 }
 
-int external_log_flush(struct hash_item* item) {
+
+
+int external_log_flush(struct hash_item* item, pthread_mutex_t lock) {
 	int item_num;
 	uint32_t size;
 	struct cache_item* p;
 	uint64_t offset;
-	char* desc;
+	char* log_item;
 	char* data;
-	char* commit;
-	char* desc_p;
+	char* log_item_p;
 	char* data_p;
-	char* commit_p;
 	uint32_t desc_size;
 	int ret;
+	uint32_t id;
 
 	if(item == NULL)
 		return -1;
@@ -400,74 +450,62 @@ int external_log_flush(struct hash_item* item) {
 
 	desc_size = sizeof(struct descriptor_block) + 
 			strlen(item->pathname) + item_num*(sizeof(struct record_item));
-	desc = malloc(desc_size);
+	log_item = malloc(desc_size + size + sizeof(struct commit_block));
 	data = malloc(size);
-	commit = malloc(sizeof(struct commit_block));
 
 	pthread_mutex_lock(&external_log_offset_lock);
 	offset = external_log_offset;
-	external_log_offset += UPPER(desc_size, BLOCK_SIZE) + UPPER(size, BLOCK_SIZE) + BLOCK_SIZE;	
+	external_log_offset += UPPER(desc_size + size + sizeof(struct commit_block), BLOCK_SIZE);	
 	pthread_mutex_unlock(&external_log_offset_lock);
 
-	*((uint32_t*) desc) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
-	desc_p = desc + sizeof(uint32_t);
-	*((uint32_t*) commit) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
-	commit_p = commit + sizeof(uint32_t);
+	*((uint32_t*) log_item) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
+	log_item_p = log_item + sizeof(uint32_t);
 	pthread_mutex_lock(&external_log_id_lock);
-	*((uint32_t*) desc_p) = external_log_id;
-	*((uint32_t*) commit_p) = external_log_id;
+	id = external_log_id;
 	external_log_id++;
 	pthread_mutex_unlock(&external_log_id_lock);
-	desc_p += sizeof(uint32_t);
-	*((int *) desc_p) = item_num;
-	desc_p += sizeof(int);
-	*((int *) desc_p) = strlen(item->pathname);
-	desc_p += sizeof(int);
-	memcpy(desc_p, item->pathname, strlen(item->pathname));
-	desc_p += strlen(item->pathname);
-
+	*((uint32_t*) log_item_p) = id;
+	log_item_p += sizeof(uint32_t);
+	*((int *) log_item_p) = item_num;
+	log_item_p += sizeof(int);
+	*((int *) log_item_p) = strlen(item->pathname);
+	log_item_p += sizeof(int);
+	memcpy(log_item_p, item->pathname, strlen(item->pathname));
+	log_item_p += strlen(item->pathname);
 
 	p = item->head;
 	data_p = data;
 	while(p != NULL) {
 		if(p->is_dirty) {
-			*((uint32_t*) desc_p) = p->size;
-			desc_p += sizeof(uint32_t);
-			*((uint32_t*) desc_p) = p->offset;
-			desc_p += sizeof(uint32_t);
+			*((uint32_t*) log_item_p) = p->size;
+			log_item_p += sizeof(uint32_t);
+			*((uint32_t*) log_item_p) = p->offset;
+			log_item_p += sizeof(uint32_t);
 			memcpy(data_p, p->data, p->size);
 			data_p += p->size;
+			p->is_dirty = 0;
 		}
 		p = p->next;
 	}
 
-	pwrite(external_log_fd, desc, desc_size, offset);
-	pwrite(external_log_fd, data, size, offset + UPPER(desc_size, BLOCK_SIZE));
-	pwrite(external_log_fd, commit, sizeof(struct commit_block), 
-			offset + UPPER(desc_size, BLOCK_SIZE) + UPPER(size, BLOCK_SIZE));
+	pthread_mutex_unlock(&lock);
+
+	memcpy(log_item_p, data, size);
+	log_item_p += size;
+	*((uint32_t*) log_item_p) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
+	log_item_p += sizeof(uint32_t);
+	*((uint32_t*) log_item_p) = id;
+	//need checksum to guarantee write order	
+
+	pwrite(external_log_fd, log_item, desc_size + size + sizeof(struct commit_block), offset);
 	ret = fsync(external_log_fd);
-
-	
-
 	if(ret < 0)
 		goto out;
 	pthread_t pid;
-	pthread_create(&pid, NULL, write_to_real_path, (void*)item );
+	pthread_create(&pid, NULL, write_to_real_path, (void*)log_item );
 
-/*	p = item->head;
-	int fd;
-	fd = open(item->pathname, O_WRONLY);
-	if(fd > 0) {
-		while(p != NULL) {
-			pwrite(fd, p->data, p->size, p->offset);
-			p = p->next;
-		}
-	}
-*/
 out:
 	free(data);
-	free(commit);
-	free(desc);
 	return ret;
 }
 
@@ -475,19 +513,23 @@ int external_log_flush_for_fsync(int fd) {
 	int ret = 0;
 	int hash_value;
 	struct hash_item* item;
+	int flag = 1;
 
 	hash_value = external_log_hash(file_map[fd], HASH_ITEM_NUM);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
 	item = hashtable[hash_value];
 	while(item != NULL) {
 		if(!strcmp(item->pathname, file_map[fd])) {
-			if(item->is_dirty)
-				ret = external_log_flush(item);
+			if(item->is_dirty) {
+				ret = external_log_flush(item, hashtable_locks[hash_value]);
+				flag = 0;
+			}
 			break;
 		}
 		item = item->next;
 	}
-	pthread_mutex_unlock(&hashtable_locks[hash_value]);
+	if(flag)
+		pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	return ret;
 }
 
@@ -688,12 +730,13 @@ void insert_item_test() {
 }
 
 void fsync_test() {
-	int i;
+/*	int i;
 
 	for(i = 0;i < HASH_ITEM_NUM;i++) {
 		if(hashtable[i] != NULL)
 			external_log_flush(hashtable[i]);
 	}
+*/
 }
 
 void show_log_content() {
