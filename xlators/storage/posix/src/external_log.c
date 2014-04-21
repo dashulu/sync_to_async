@@ -155,6 +155,7 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 		free(data);
 	} else if(a1 <= b1 && b2 <= a2) {
 		memcpy((*head)->data + b1 - a1, data->data, b2 - b1);
+		(*head)->is_dirty = 1;
 		free(data->data);
 		free(data);
 	} else {
@@ -165,6 +166,7 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 unsigned int external_log_hash(const char* str, int upper_bound) {
 	unsigned int h;
 	unsigned char *p;
+	int len;
 
 	if(!str)
 		return 0;
@@ -346,6 +348,23 @@ int external_log_read(int fd, struct read_record** record, uint32_t size, uint32
 	return 0;
 }
 
+void *write_to_real_path(void* item) {
+	struct cache_item* p;
+	p = ((struct hash_item*)item)->head;
+	int fd;
+	fd = open(((struct hash_item*)item)->pathname, O_WRONLY);
+	if(fd > 0) {
+		while(p != NULL) {
+			if(p->is_dirty) {
+				pwrite(fd, p->data, p->size, p->offset);
+				p->is_dirty = 0;
+			}
+			p = p->next;
+		}
+	}
+	return NULL;
+}
+
 int external_log_flush(struct hash_item* item) {
 	int item_num;
 	uint32_t size;
@@ -363,12 +382,17 @@ int external_log_flush(struct hash_item* item) {
 	if(item == NULL)
 		return -1;
 
+	if(!item->is_dirty)
+		return 0;
+
 	item_num = 0;
 	size = 0;
 	p = item->head;
 	while(p != NULL) {
-		item_num++;
-		size += p->size;
+		if(p->is_dirty) {
+			item_num++;
+			size += p->size;
+		}
 		p = p->next;
 	}
 
@@ -406,12 +430,14 @@ int external_log_flush(struct hash_item* item) {
 	p = item->head;
 	data_p = data;
 	while(p != NULL) {
-		*((uint32_t*) desc_p) = p->size;
-		desc_p += sizeof(uint32_t);
-		*((uint32_t*) desc_p) = p->offset;
-		desc_p += sizeof(uint32_t);
-		memcpy(data_p, p->data, p->size);
-		data_p += p->size;
+		if(p->is_dirty) {
+			*((uint32_t*) desc_p) = p->size;
+			desc_p += sizeof(uint32_t);
+			*((uint32_t*) desc_p) = p->offset;
+			desc_p += sizeof(uint32_t);
+			memcpy(data_p, p->data, p->size);
+			data_p += p->size;
+		}
 		p = p->next;
 	}
 
@@ -421,10 +447,14 @@ int external_log_flush(struct hash_item* item) {
 			offset + UPPER(desc_size, BLOCK_SIZE) + UPPER(size, BLOCK_SIZE));
 	ret = fsync(external_log_fd);
 
+	
+
 	if(ret < 0)
 		goto out;
+	pthread_t pid;
+	pthread_create(&pid, NULL, write_to_real_path, (void*)item );
 
-	p = item->head;
+/*	p = item->head;
 	int fd;
 	fd = open(item->pathname, O_WRONLY);
 	if(fd > 0) {
@@ -433,7 +463,7 @@ int external_log_flush(struct hash_item* item) {
 			p = p->next;
 		}
 	}
-
+*/
 out:
 	free(data);
 	free(commit);

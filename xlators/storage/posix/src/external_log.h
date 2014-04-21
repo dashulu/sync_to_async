@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
 
 
 struct read_record {
@@ -65,6 +66,7 @@ struct hash_item {
 	int is_dirty;
 	int64_t size;
 	int64_t blocks;
+	time_t mtime;
 
 //	pthread_mutex_t lock;
 //	bool is_dirty;
