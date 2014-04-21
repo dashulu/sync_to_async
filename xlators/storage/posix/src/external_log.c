@@ -11,7 +11,7 @@
 #include "util.h"
 #include "external_log.h"
 
-int external_log_flush(struct hash_item* item, pthread_mutext lock);
+int external_log_flush(struct hash_item* item, pthread_mutex_t lock);
 
 int external_log_init() {
 	int i;
@@ -171,7 +171,6 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 unsigned int external_log_hash(const char* str, int upper_bound) {
 	unsigned int h;
 	unsigned char *p;
-	int len;
 
 	if(!str)
 		return 0;
@@ -354,7 +353,7 @@ int external_log_read(int fd, struct read_record** record, uint32_t size, uint32
 }
 
 void *write_to_real_path(void* item) {
-	struct cache_item* p;
+//	struct cache_item* p;
 	struct descriptor_block* desc = (struct descriptor_block*)item;
 	char* filename;
 	char* data;
@@ -367,7 +366,7 @@ void *write_to_real_path(void* item) {
 	filename = malloc(desc->path_size + 1);
 	memcpy(filename, (char*) item + sizeof(struct descriptor_block), desc->path_size);
 	filename[desc->path_size] = '\0';
-	records = (struct record_item)((char*)item + sizeof(struct descriptor_block) + desc->path_size);
+	records = (struct record_item*)((char*)item + sizeof(struct descriptor_block) + desc->path_size);
 	data = (char*) records + desc->num_of_item*sizeof(struct record_item);
 
 	int fd;
@@ -383,21 +382,21 @@ void *write_to_real_path(void* item) {
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
 	h_item = hashtable[hash_value];
 	while(h_item != NULL) {
-		if(!strcmp(item->pathname, file_map[fd])) {
+		if(!strcmp(h_item->pathname, file_map[fd])) {
 			head = h_item->head;
 			if(head == NULL) {
 				break;
 			}
 			next = head->next;
 			for(i = 0;i < desc->num_of_item;i++) {
-				while(next != NULL && next->offset < desc->offset) {
+				while(next != NULL && next->offset < records[i].offset) {
 					head = head->next;
 					next = next->next;
 				}
 				if(next == NULL) {
 					break;
 				}
-				if(next->offset == desc->offset && next->size == desc->size) {
+				if(next->offset == records[i].offset && next->size == records[i].size) {
 					head->next = next->next;
 					free(next->data);
 					free(next);
@@ -406,7 +405,7 @@ void *write_to_real_path(void* item) {
 			}
 			break;
 		}
-		item = item->next;
+		h_item = h_item->next;
 	}
 	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	free((char*) item);
