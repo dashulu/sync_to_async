@@ -9,8 +9,8 @@
 
 struct read_record {
 	char* data;
-	uint32_t size;
-	uint32_t offset;
+	uint64_t size;
+	uint64_t offset;
 	struct read_record* next;
 };
 
@@ -19,8 +19,8 @@ struct read_record {
 // log structure in the disk
 struct record_item {
 //	uint32_t begin;  // the begin of data for this item in the log file;
-	uint32_t size;	// size of this data
-	uint32_t offset;	// the place that data needs to write;
+	uint64_t size;	// size of this data
+	uint64_t offset;	// the place that data needs to write;
 //	char	substitute_flag; // if the first 4 byte is the same to sig, it will be substitute by 0x0000;
 };
 
@@ -43,8 +43,8 @@ struct commit_block {
 // data structure for management in memory
 struct record_of_data {
 	char* path;
-	uint32_t size;
-	uint32_t offset;
+	uint64_t size;
+	uint64_t offset;
 	char* data;
 	struct record_of_data *pre;
 	struct record_of_data *next;
@@ -54,8 +54,8 @@ struct record_of_data {
 
 struct cache_item {
 	char* data;
-	uint32_t size;
-	uint32_t offset;
+	uint64_t size;
+	uint64_t offset;
 	int is_dirty;
 //	bool is_commiting;
 	struct cache_item* next;
@@ -91,18 +91,18 @@ int external_log_fd;
 uint64_t external_log_offset;
 pthread_mutex_t external_log_offset_lock;
 
-int external_log_id;
+uint32_t external_log_id;
 pthread_mutex_t external_log_id_lock;
 
 struct hash_item* hashtable[HASH_ITEM_NUM];
 pthread_mutex_t hashtable_locks[HASH_ITEM_NUM];
 
 int init_hashtable(struct hash_item* hashtable, int num);
-int insert_item(int fd, struct iovec *vec, int count, uint32_t offset);
+int insert_item(int fd, struct iovec *vec, int count, uint64_t offset);
 void destroy_hash_item(struct hash_item* item);
 unsigned int external_log_hash(const char* str, int upper_bound);
 int external_log_init();
 int external_log_finish();
 int external_log_flush_for_fsync(int fd);
-int external_log_read(int fd, struct read_record** record, uint32_t size, uint32_t offset);
+int external_log_read(int fd, struct read_record** record, uint64_t size, uint64_t offset);
 struct hash_item* get_hash_item(int fd);

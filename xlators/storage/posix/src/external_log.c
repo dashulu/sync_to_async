@@ -88,9 +88,9 @@ int external_log_finish() {
 	return 0;
 }
 
-int merge_iovec(struct cache_item** cache, struct iovec* vec, int count, uint32_t offset) {
+int merge_iovec(struct cache_item** cache, struct iovec* vec, int count, uint64_t offset) {
 	int i;
-	int internal_offset;
+	uint64_t internal_offset;
 
 	if(vec == NULL || count < 0 )
 		return 0;
@@ -396,7 +396,7 @@ unsigned int external_log_hash(const char* str, int upper_bound) {
 
 
 
-int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
+int insert_item(int fd, struct iovec *vec, int count, uint64_t offset) {
 	int hash_value;
 	char* filename;
 	int ret;
@@ -476,10 +476,11 @@ struct hash_item* get_hash_item(int fd) {
 	return item;
 }
 
-static int __external_log_read(struct cache_item* item, struct read_record** record, uint32_t size, uint32_t offset) {
+static int __external_log_read(struct cache_item* item, struct read_record** record, uint64_t size, uint64_t offset) {
 	struct read_record* tmp;
 
 	*record = NULL;
+	tmp = NULL;
 	while(item != NULL && item->offset < offset + size) {
 		if(item->offset >= offset && offset + size > item->offset && offset + size <= item->offset + item->size) {
 			if(*record == NULL) {
@@ -539,7 +540,7 @@ static int __external_log_read(struct cache_item* item, struct read_record** rec
 	return 0;
 }
 
-int external_log_read(int fd, struct read_record** record, uint32_t size, uint32_t offset) {
+int external_log_read(int fd, struct read_record** record, uint64_t size, uint64_t offset) {
 	int hash_value;
 	struct hash_item* item;
 
@@ -640,14 +641,14 @@ void *write_to_real_path(void* item) {
 
 int external_log_flush(struct hash_item* item, pthread_mutex_t* lock) {
 	int item_num;
-	uint32_t size;
+	uint64_t size;
 	struct cache_item* p;
 	uint64_t offset;
 	char* log_item;
 	char* data;
 	char* log_item_p;
 	char* data_p;
-	uint32_t desc_size;
+	uint64_t desc_size;
 	int ret;
 	uint32_t id;
 
@@ -703,10 +704,10 @@ int external_log_flush(struct hash_item* item, pthread_mutex_t* lock) {
 	data_p = data;
 	while(p != NULL) {
 		if(p->is_dirty) {
-			*((uint32_t*) log_item_p) = p->size;
-			log_item_p += sizeof(uint32_t);
-			*((uint32_t*) log_item_p) = p->offset;
-			log_item_p += sizeof(uint32_t);
+			*((uint64_t*) log_item_p) = p->size;
+			log_item_p += sizeof(uint64_t);
+			*((uint64_t*) log_item_p) = p->offset;
+			log_item_p += sizeof(uint64_t);
 			memcpy(data_p, p->data, p->size);
 			data_p += p->size;
 			p->is_dirty = 0;
@@ -790,7 +791,7 @@ void free_iovec(struct iovec* vec, int count) {
 	free(vec);
 }
 
-static struct cache_item* get_cache_item(int count, uint32_t offset, char flag) {
+static struct cache_item* get_cache_item(int count, uint64_t offset, char flag) {
 	struct cache_item* cache;
 	struct iovec* vec;
 
@@ -805,7 +806,7 @@ static void test_merge_iovec() {
 
 	for(i = 0;i < 10;i++) {
 		cache = get_cache_item(5+i, i*1000, 'a' + i);
-		printf("data:%s size:%u offset:%u is_dirty:%d\n", cache->data, 
+		printf("data:%s size:%lu offset:%lu is_dirty:%d\n", cache->data, 
 			cache->size, cache->offset, cache->is_dirty);
 		
 		free(cache->data);
@@ -892,7 +893,7 @@ static int external_log_finish_for_test() {
 void print_cache_item(struct cache_item* item , int i) {
 	if(item == NULL)
 		return;
-	printf("i:%d data:%s size:%u offset:%u is_dirty:%d \n", i, item->data, 
+	printf("i:%d data:%s size:%lu offset:%lu is_dirty:%d \n", i, item->data, 
 			item->size, item->offset, item->is_dirty);
 	print_cache_item(item->next, i+1);
 }
@@ -999,7 +1000,7 @@ void show_log_content() {
 			pathname, d->sig, d->id, d->num_of_item, d->path_size);
 		item = (struct record_item*)desc_p;
 		for(i = 0;i < d->num_of_item;i++) {
-			printf("size:%u offset:%u\n", item->size, item->offset);
+			printf("size:%lu offset:%lu\n", item->size, item->offset);
 			item++;
 		}
 		printf("data:%s\n", data);
@@ -1025,7 +1026,7 @@ int main() {
 	if(rec == NULL) {
 		printf("null\n");
 	} else {
-		printf("%s  %u %u\n", rec->data, rec->offset, rec->size);
+		printf("%s  %lu %lu\n", rec->data, rec->offset, rec->size);
 	}
 	show_log_content();
 	external_log_finish_for_test();
