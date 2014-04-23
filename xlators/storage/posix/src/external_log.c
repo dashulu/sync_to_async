@@ -51,7 +51,7 @@ int external_log_init() {
 	pthread_mutex_init(&external_log_id_lock, NULL);
 	pthread_mutex_init(&external_log_offset_lock, NULL);
 	
-	external_log_fd = open("/home/user/sdb1/external_log", O_RDWR);
+	external_log_fd = open("/home/dashu/sdb1/external_log", O_RDWR);
 	if(external_log_fd <= 0) {
 		printf("open failed\n");
 		exit(0);
@@ -136,6 +136,157 @@ uint64_t calculate_memory() {
 
 }
 
+
+static void deal_with_overlap(struct cache_item* item) {
+	struct cache_item* p;
+
+	p = item->next;
+	while(p != NULL) {
+		if(item->offset + item->size <= p->offset) {
+			break;
+		} else if(item->offset + item->size > p->offset && 
+					item->offset + item->size < p->offset + p->size) {
+			p->size = p->offset + p->size - (item->offset + item->size);
+			char* tmp = malloc(p->size);
+			memcpy(tmp, p->data + item->offset + item->size - p->offset, p->size);
+			p->offset = item->offset + item->size;
+			free(p->data);
+			p->data = tmp;
+			break;
+		} else {
+			item->next = p->next;
+			free(p->data);
+			free(p);
+			p = item->next;
+		}
+	}
+}
+
+
+static void insert_cache_item(struct cache_item** head, struct cache_item* data) {
+	if((*head) == NULL) {
+		(*head) = data;
+		return;
+	} 
+
+	uint64_t a1,a2,b1,b2;
+	a1 = (*head)->offset;
+	a2 = (*head)->offset + (*head)->size;
+	b1 = data->offset;
+	b2 = data->offset + data->size;
+
+	if(a1 >= b2) {
+		data->next = (*head);
+		(*head) = data;
+		//check_continue(*head, data);
+		return;
+	} else if(b1 < a1 && b2 >= a1 && b2 < a2) {
+		uint64_t overlap = b2 - a1;
+		uint64_t front = a1 - b1; 
+		uint64_t end = a2 - b2;
+		struct cache_item* p;
+		char* tmp;
+		//minimize the memory copy size.
+		if(end <= overlap + front) {
+			p = *head;
+			*head = data;
+			data->next = p;
+			tmp = malloc(end);
+			memcpy(tmp, p->data + overlap, end);
+			free(p->data);
+			p->data = tmp;
+			p->size = end;
+			p->offset = p->offset + overlap;
+			data->is_dirty = 1;
+			p->is_dirty = 1;
+		} else {
+			memcpy((*head)->data, data->data + front, overlap);
+			data->size = front;
+			tmp = malloc(front);
+			memcpy(tmp, data->data, front);
+			free(data->data);
+			data->data = tmp;
+			p = *head;
+			*head = data;
+			data->next = p;
+			data->is_dirty = 1;
+			p->is_dirty = 1;
+		}
+	} else if(b1 <= a1 && a2 <= b2) {
+		struct cache_item* tmp = (*head);
+		(*head) = data;
+		data->next = tmp->next;
+		//check_continue(*head, data);
+		free(tmp->data);
+		free(tmp);
+		deal_with_overlap(data);
+	} else if(a1 < b1 && b1 < a2 && a2 < b2) {
+		uint64_t overlap = a2 - b1;
+		uint64_t front = b1 - a1; 
+		uint64_t end = b2 - a2;
+		struct cache_item* p;
+		char* tmp;
+		//minimize the memory copy size.
+		if(front <= overlap + end) {
+			p = (*head)->next;
+			(*head)->next = data;
+			data->next = p;
+			tmp = malloc(front);
+			memcpy(tmp, (*head)->data, front);
+			free((*head)->data);
+			(*head)->data = tmp;
+			(*head)->size = front;
+		} else {
+			memcpy((*head)->data + front, data->data, overlap);
+			tmp = malloc(end);
+			memcpy(tmp, data->data + overlap, end);
+			free(data->data);
+			data->data = tmp;
+			data->offset = data->offset + overlap;
+			data->size = end;
+			p = (*head)->next;
+			(*head)->next = data;
+			data->next = p;
+			data->is_dirty = 1;
+			(*head)->is_dirty = 1;
+		}
+		deal_with_overlap(data);
+	} else if(a1 <= b1 && b2 <= a2) {
+		if(b2 - b1 <= a2 - a1 - (b2 - b1)) {
+			memcpy((*head)->data + b1 - a1, data->data, b2 - b1);
+			(*head)->is_dirty = 1;
+			free(data->data);
+			free(data);
+		} else {
+			char* head_data = (*head)->data;
+			struct cache_item* next = (*head)->next;
+			if(b1 - a1) {
+				char* tmp = malloc(b1 - a1);
+				memcpy(tmp, head_data, b1 - a1);
+				(*head)->size = b1 - a1;
+				(*head)->data = tmp;
+				(*head)->next = data;
+				data->next = next;
+			}
+			if(a2 - b2) {
+				char* tmp = malloc(a2 - b2);
+				memcpy(tmp, head_data + b2 - a1, a2 - b2);
+				struct cache_item* cache = malloc(sizeof(struct cache_item));
+				cache->is_dirty = 1;
+				cache->size = a2 - b2;
+				cache->offset = b2;
+				cache->data = tmp;
+				cache->next = data->next;
+				data->next = cache;
+			}
+		}
+	} else {
+		insert_cache_item(&((*head)->next), data);
+	}
+}
+
+
+/*
 static void insert_cache_item(struct cache_item** head, struct cache_item* data) {
 	if((*head) == NULL) {
 		(*head) = data;
@@ -152,12 +303,13 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 		if(b1 <= a2 && b2 >= (*head)->next->offset) {
 			int c1 = (*head)->next->offset;
 			int c2 = (*head)->next->offset + (*head)->next->size;
+
+			if(c2 - a1 <= 1048576) {
 			char* tmp = malloc(c2 - a1);
 			if(tmp == NULL) {
 				printf("offset:%u size:%u\n", (*head)->next->offset, (*head)->next->size);
 				printf("lack of memory.c2:%d a1:%d\n",c2, a1);
 				printf("memory comsumed:%lu \n", calculate_memory());
-//				external_log_finish();
 				exit(0);
 			}
 			memcpy(tmp, (*head)->data, b1 - a1);
@@ -227,7 +379,7 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 	} else {
 		insert_cache_item(&((*head)->next), data);
 	}
-}
+}*/
 
 unsigned int external_log_hash(const char* str, int upper_bound) {
 	unsigned int h;
