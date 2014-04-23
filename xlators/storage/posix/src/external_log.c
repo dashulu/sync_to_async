@@ -11,7 +11,29 @@
 #include "util.h"
 #include "external_log.h"
 
-int external_log_flush(struct hash_item* item, pthread_mutex_t lock);
+int external_log_flush(struct hash_item* item, pthread_mutex_t* lock);
+
+int check_continue(struct cache_item* a, struct cache_item* b) {
+	struct cache_item* head;
+	struct cache_item* next;
+
+	if(hashtable[3879] != NULL) {
+		head = hashtable[3879]->head;
+		if(head != NULL) {
+			next = head->next;
+			while(next != NULL) {
+				if(head->offset + head->size >= next->offset) {
+//					a->size = 0;
+//					b->size = 0;
+					break;
+				}
+				head = next;
+				next = next->next;
+			}
+		}
+	}
+	return 0;
+}
 
 int external_log_init() {
 	int i;
@@ -48,7 +70,7 @@ int external_log_finish() {
 	for(i = 0;i < HASH_ITEM_NUM;i++) {
 		if(hashtable[i] != NULL) {
 			pthread_mutex_lock(&tmp);
-			external_log_flush(hashtable[i], tmp);
+			external_log_flush(hashtable[i], &tmp);
 			destroy_hash_item(hashtable[i]);
 		}
 		pthread_mutex_destroy(&hashtable_locks[i]); 
@@ -89,6 +111,30 @@ int merge_iovec(struct cache_item** cache, struct iovec* vec, int count, uint32_
 	return internal_offset;
 }
 
+uint64_t calculate(struct cache_item* item) {
+	uint64_t sum = 0;
+
+	while(item != NULL) {
+		sum += item->size;
+		item = item->next;
+	}
+
+	return sum;
+}
+
+uint64_t calculate_memory() {
+	int i;
+	uint64_t sum = 0;
+
+	for(i = 0;i < HASH_ITEM_NUM;i++) {
+		if(hashtable[i] != NULL) {
+			sum += calculate(hashtable[i]->head);
+		}
+	}
+
+	return sum;
+
+}
 
 static void insert_cache_item(struct cache_item** head, struct cache_item* data) {
 	if((*head) == NULL) {
@@ -96,7 +142,7 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 		return;
 	}
 
-	int a1,a2,b1,b2;
+	uint32_t a1,a2,b1,b2;
 	a1 = (*head)->offset;
 	a2 = (*head)->offset + (*head)->size;
 	b1 = data->offset;
@@ -107,6 +153,13 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 			int c1 = (*head)->next->offset;
 			int c2 = (*head)->next->offset + (*head)->next->size;
 			char* tmp = malloc(c2 - a1);
+			if(tmp == NULL) {
+				printf("offset:%u size:%u\n", (*head)->next->offset, (*head)->next->size);
+				printf("lack of memory.c2:%d a1:%d\n",c2, a1);
+				printf("memory comsumed:%lu \n", calculate_memory());
+//				external_log_finish();
+				exit(0);
+			}
 			memcpy(tmp, (*head)->data, b1 - a1);
 			memcpy(tmp + b1 - a1, data->data, b2 - b1);
 			memcpy(tmp + b2 - a1, (*head)->next->data + b2 - c1, c2 - b2);
@@ -118,6 +171,9 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 			free(data);
 			struct cache_item* item = (*head)->next;
 			(*head)->next = item->next;
+
+			//check_continue(*head, (*head)->next);
+
 			free(item->data);
 			free(item);
 			return;
@@ -127,6 +183,7 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 	if(a1 > b2) {
 		data->next = (*head);
 		(*head) = data;
+		//check_continue(*head, data);
 		return;
 	} else if(b1 <= a1 && b2 >= a1 && b2 <= a2) {
 		int overlap = b2 - a1;
@@ -140,11 +197,13 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 		(*head)->size = size;
 		(*head)->offset = data->offset;
 		(*head)->is_dirty = 1;
+		//check_continue(*head, data);
 		free(data->data);
 		free(data);
 	} else if(b1 <= a1 && a2 <= b2) {
 		struct cache_item* tmp = (*head);
 		(*head) = data;
+		//check_continue(*head, data);
 		free(tmp->data);
 		free(tmp);
 	} else if(a1 <= b1 && b1 <= a2 && a2 <= b2) {
@@ -156,11 +215,13 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 		(*head)->size = b2 - a1;
 		(*head)->offset = a1;
 		(*head)->is_dirty = 1;
+		//check_continue(*head, data);
 		free(data->data);
 		free(data);
 	} else if(a1 <= b1 && b2 <= a2) {
 		memcpy((*head)->data + b1 - a1, data->data, b2 - b1);
 		(*head)->is_dirty = 1;
+		//check_continue(*head, data);
 		free(data->data);
 		free(data);
 	} else {
@@ -210,8 +271,9 @@ int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 	hash_value = external_log_hash(filename, HASH_ITEM_NUM);
 
 
-
+	//printf("insert try lock:%d", hash_value);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
+	//printf("insert already lock:%d", hash_value);
 	p = &(hashtable[hash_value]);
 	while(1) {
 		if((*p) == NULL) {
@@ -239,6 +301,7 @@ int insert_item(int fd, struct iovec *vec, int count, uint32_t offset) {
 		}
 		p = &((*p)->next);
 	}
+	//printf("insert unlock:%d", hash_value);
 	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	return ret;
 }
@@ -334,7 +397,9 @@ int external_log_read(int fd, struct read_record** record, uint32_t size, uint32
 	}
 
 	hash_value = external_log_hash(file_map[fd], HASH_ITEM_NUM);
+	//printf("read try lock:%d\n", hash_value);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
+	//printf("read already lock:%d\n", hash_value);
 	item = hashtable[hash_value];
 	while(item != NULL) {
 		if(!strcmp(item->pathname, file_map[fd])) {
@@ -344,10 +409,12 @@ int external_log_read(int fd, struct read_record** record, uint32_t size, uint32
 	}
 	if(item == NULL) {
 		*record = NULL;
+		//printf("read unlock:%d\n", hash_value);
 		pthread_mutex_unlock(&hashtable_locks[hash_value]);
 		return 0;
 	}
 	__external_log_read(item->head, record, size, offset);
+	//printf("read unlock:%d\n", hash_value);
 	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	return 0;
 }
@@ -379,10 +446,12 @@ void *write_to_real_path(void* item) {
 	}
 
 	int hash_value = external_log_hash(filename, HASH_ITEM_NUM);
+	//printf("write try lock %d.\n", hash_value);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
+	//printf("write already lock %d\n", hash_value);
 	h_item = hashtable[hash_value];
 	while(h_item != NULL) {
-		if(!strcmp(h_item->pathname, file_map[fd])) {
+		if(!strcmp(h_item->pathname, filename)) {
 			head = h_item->head;
 			if(head == NULL) {
 				break;
@@ -396,7 +465,8 @@ void *write_to_real_path(void* item) {
 				if(next == NULL) {
 					break;
 				}
-				if(next->offset == records[i].offset && next->size == records[i].size) {
+				if(next->offset == records[i].offset && next->size == records[i].size &&
+					!next->is_dirty) {
 					head->next = next->next;
 					free(next->data);
 					free(next);
@@ -407,6 +477,7 @@ void *write_to_real_path(void* item) {
 		}
 		h_item = h_item->next;
 	}
+	//printf("write to unlock %d", hash_value);
 	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	free((char*) item);
 	free(filename);
@@ -415,7 +486,7 @@ void *write_to_real_path(void* item) {
 
 
 
-int external_log_flush(struct hash_item* item, pthread_mutex_t lock) {
+int external_log_flush(struct hash_item* item, pthread_mutex_t* lock) {
 	int item_num;
 	uint32_t size;
 	struct cache_item* p;
@@ -428,11 +499,15 @@ int external_log_flush(struct hash_item* item, pthread_mutex_t lock) {
 	int ret;
 	uint32_t id;
 
-	if(item == NULL)
+	if(item == NULL) {
+		pthread_mutex_unlock(lock);
 		return -1;
+	}
 
-	if(!item->is_dirty)
+	if(!item->is_dirty) {
+		pthread_mutex_unlock(lock);
 		return 0;
+	}
 
 	item_num = 0;
 	size = 0;
@@ -487,7 +562,8 @@ int external_log_flush(struct hash_item* item, pthread_mutex_t lock) {
 		p = p->next;
 	}
 
-	pthread_mutex_unlock(&lock);
+	//printf("flush unlock:%d\n", external_log_hash(item->pathname, HASH_ITEM_NUM));
+	pthread_mutex_unlock(lock);
 
 	memcpy(log_item_p, data, size);
 	log_item_p += size;
@@ -515,20 +591,24 @@ int external_log_flush_for_fsync(int fd) {
 	int flag = 1;
 
 	hash_value = external_log_hash(file_map[fd], HASH_ITEM_NUM);
+	//printf("fsync try lock %d", hash_value);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
+	//printf("fsync already lock %d", hash_value);
 	item = hashtable[hash_value];
 	while(item != NULL) {
 		if(!strcmp(item->pathname, file_map[fd])) {
 			if(item->is_dirty) {
-				ret = external_log_flush(item, hashtable_locks[hash_value]);
+				ret = external_log_flush(item, &hashtable_locks[hash_value]);
 				flag = 0;
 			}
 			break;
 		}
 		item = item->next;
 	}
-	if(flag)
+	if(flag) {
+		//printf("fsync unlock %d", hash_value);
 		pthread_mutex_unlock(&hashtable_locks[hash_value]);
+	}
 	return ret;
 }
 

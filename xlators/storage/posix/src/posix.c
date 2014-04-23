@@ -236,12 +236,31 @@ posix_do_chmod (xlator_t *this, const char *path, struct iatt *stbuf)
         mode_t      mode = 0;
         struct stat stat;
         int         is_symlink = 0;
+        struct hash_item* item;
 
         ret = sys_lstat (path, &stat);
         if (ret != 0) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "lstat failed: %s (%s)", path, strerror (errno));
                 goto out;
+        }
+
+        int hash_value = external_log_hash(path, HASH_ITEM_NUM);
+        item = hashtable[hash_value];
+        while(item != NULL) {
+            if(!strcmp(item->pathname, path)) {
+                break;
+            }
+            item = item->next;
+        }
+        if(item != NULL) {
+            if(item->size == -1) {
+                item->size = stat.st_size;
+                item->blocks = stat.st_blocks;
+            } else {
+                stat.st_size = item->size;
+                stat.st_blocks = item->blocks;
+            }
         }
 
         if (S_ISLNK (stat.st_mode))
