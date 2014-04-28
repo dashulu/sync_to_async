@@ -14,6 +14,10 @@ struct read_record {
 	struct read_record* next;
 };
 
+struct write_to_real_path_para{
+	char* data;
+	char* records;
+};
 
 
 // log structure in the disk
@@ -21,12 +25,14 @@ struct record_item {
 //	uint32_t begin;  // the begin of data for this item in the log file;
 	uint64_t size;	// size of this data
 	uint64_t offset;	// the place that data needs to write;
+	uint64_t version;
 //	char	substitute_flag; // if the first 4 byte is the same to sig, it will be substitute by 0x0000;
 };
 
 struct descriptor_block {
 	uint32_t sig;
 	uint32_t id;
+	uint32_t op;
 	int num_of_item;
 	int path_size;
 //	char* pathname;
@@ -57,6 +63,7 @@ struct cache_item {
 	uint64_t size;
 	uint64_t offset;
 	int is_dirty;
+	uint32_t version;
 //	bool is_commiting;
 	struct cache_item* next;
 	pthread_mutex_t lock;
@@ -65,6 +72,7 @@ struct cache_item {
 struct hash_item {
 	char* pathname;
 	int is_dirty;
+	uint32_t dirty_size; 
 	int64_t size;
 	int64_t blocks;
 	time_t mtime;
@@ -81,6 +89,11 @@ struct hash_item {
 #define HASH_ITEM_NUM 4099
 #define EXTERNAL_LOG_METADATA_BLOCK_SIG 0xbeefbeef
 #define BLOCK_SIZE 4096
+#define MAX_DIRTY_SIZE 52428800  // 50M
+
+#define EXTERNAL_LOG_WRITEV 1
+#define EXTERNAL_LOG_TRUNCATE 2
+#define EXTERNAL_LOG_UNLINK 3
 
 
 // a map from fd to the path of file. fd is the index;
@@ -90,6 +103,9 @@ pthread_mutex_t file_map_lock;
 int external_log_fd;
 uint64_t external_log_offset;
 pthread_mutex_t external_log_offset_lock;
+
+
+pthread_t background_pid;
 
 uint32_t external_log_id;
 pthread_mutex_t external_log_id_lock;
@@ -105,4 +121,8 @@ int external_log_init();
 int external_log_finish();
 int external_log_flush_for_fsync(int fd);
 int external_log_read(int fd, struct read_record** record, uint64_t size, uint64_t offset);
-struct hash_item* get_hash_item(int fd);
+//struct hash_item* get_hash_item(int fd);
+//int external_log_stat_by_fd(int fd, struct stat* obj);
+int external_log_stat(const char* path, struct stat* obj);
+int external_log_truncate(const char* path, uint64_t size);
+int external_log_unlink(const char* path);

@@ -236,31 +236,12 @@ posix_do_chmod (xlator_t *this, const char *path, struct iatt *stbuf)
         mode_t      mode = 0;
         struct stat stat;
         int         is_symlink = 0;
-        struct hash_item* item;
 
         ret = sys_lstat (path, &stat);
         if (ret != 0) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "lstat failed: %s (%s)", path, strerror (errno));
                 goto out;
-        }
-
-        int hash_value = external_log_hash(path, HASH_ITEM_NUM);
-        item = hashtable[hash_value];
-        while(item != NULL) {
-            if(!strcmp(item->pathname, path)) {
-                break;
-            }
-            item = item->next;
-        }
-        if(item != NULL) {
-            if(item->size == -1) {
-                item->size = stat.st_size;
-                item->blocks = stat.st_blocks;
-            } else {
-                stat.st_size = item->size;
-                stat.st_blocks = item->blocks;
-            }
         }
 
         if (S_ISLNK (stat.st_mode))
@@ -1075,8 +1056,9 @@ posix_unlink (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        if (stbuf.ia_nlink == 1)
+        if (stbuf.ia_nlink == 1) {
                 posix_handle_unset (this, stbuf.ia_gfid, NULL);
+        }
 
         priv = this->private;
         if (priv->background_unlink) {
@@ -1636,6 +1618,7 @@ posix_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset,
                 goto out;
         }
 
+        external_log_truncate(real_path, offset);
         op_ret = truncate (real_path, offset);
         if (op_ret == -1) {
                 op_errno = errno;
@@ -1644,6 +1627,7 @@ posix_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset,
                         real_path, strerror (op_errno));
                 goto out;
         }
+
 
         op_ret = posix_pstat (this, loc->gfid, real_path, &postbuf);
         if (op_ret == -1) {
@@ -1998,16 +1982,16 @@ posix_readv (call_frame_t *frame, xlator_t *this,
             } else {
                 op_ret = pread (_fd, iobuf->ptr, size, offset);
                 struct read_record* tmp;
-                int external_log_offset = 0;
+                int my_offset = 0;
                 while(record != NULL) {
                     tmp = record;
                     memcpy(iobuf->ptr + record->offset - offset, record->data, record->size);
-                    external_log_offset = record->offset + record->size;
+                    my_offset = record->offset + record->size;
                     record = record->next;
                     free(tmp->data);
                     free(tmp);
                 }
-                op_ret = external_log_offset - offset > op_ret ? external_log_offset - offset : op_ret;
+                op_ret = my_offset - offset > op_ret ? my_offset - offset : op_ret;
             }
         }
 
@@ -2085,13 +2069,6 @@ __posix_pwritev (int fd, struct iovec *vector, int count, off_t offset)
         for (idx = 0; idx < count; idx++) {
                 retval = pwrite (fd, vector[idx].iov_base, vector[idx].iov_len,
                                  internal_off);
-/*                nilfs_retval = pwrite (nilfs_fd, vector[idx].iov_base, vector[idx].iov_len,
-                                 nilfs_offset);
-                if (retval == -1 || nilfs_retval == -1) {
-                        op_ret = -errno;
-                        goto err;
-                }
-*/
                 if (retval == -1) {
                         op_ret = -errno;
                         goto err;
@@ -3622,6 +3599,7 @@ posix_ftruncate (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
+        external_log_truncate(file_map[_fd], offset);
         op_ret = ftruncate (_fd, offset);
 
         if (op_ret == -1) {
