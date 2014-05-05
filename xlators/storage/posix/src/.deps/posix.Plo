@@ -119,7 +119,7 @@ posix.lo: posix.c ../../../../config.h /usr/include/openssl/md5.h \
  /usr/include/rpc/rpc_msg.h /usr/include/rpc/auth_unix.h \
  /usr/include/rpc/auth_des.h /usr/include/rpc/svc.h \
  /usr/include/rpc/svc_auth.h ../../../../libglusterfs/src/hashfn.h \
- external_log.h util.h
+ external_log.h queue.h util.h
 
 ../../../../config.h:
 
@@ -458,5 +458,7 @@ posix-aio.h:
 ../../../../libglusterfs/src/hashfn.h:
 
 external_log.h:
+
+queue.h:
 
 util.h:

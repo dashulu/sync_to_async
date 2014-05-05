@@ -9,12 +9,14 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <time.h>
+#include "queue.h"
 #include "util.h"
 #include "external_log.h"
 
 int external_log_flush(struct hash_item* item, pthread_mutex_t* lock);
 void destroy_hash_item2(struct hash_item** item);
 void destroy_cache_item(struct cache_item* item);
+void *background_write_fn(void* obj);
 
 void *background_flush_thread(void* obj) {
     int i = 0;
@@ -26,7 +28,7 @@ void *background_flush_thread(void* obj) {
         for(i = 0;i < HASH_ITEM_NUM;i++) {
             p = hashtable[i];
             while(p != NULL) {
-                if((current_time - p->mtime >= 5 || p->dirty_size >= MAX_DIRTY_SIZE) &&
+                if((current_time - p->mtime >= TIME_TO_FLUSH || p->dirty_size >= MAX_DIRTY_SIZE) &&
                 			 p->is_dirty) {
                     pthread_mutex_lock(&hashtable_locks[i]);
                     external_log_flush(p, &hashtable_locks[i]);
@@ -60,6 +62,7 @@ int check_continue(struct cache_item* a, struct cache_item* b) {
 
 int external_log_init() {
 	int i;
+	uint64_t size = 6;
 
 	for(i = 0;i < HASH_ITEM_NUM;i++) {
 		hashtable[i] = NULL;
@@ -74,12 +77,15 @@ int external_log_init() {
 	pthread_mutex_init(&external_log_id_lock, NULL);
 	pthread_mutex_init(&external_log_offset_lock, NULL);
 	
-	external_log_fd = open("/home/user/sdb1/external_log", O_RDWR);
+	external_log_fd = open("/home/dashu/sdb1/external_log", O_RDWR);
 	if(external_log_fd <= 0) {
 		printf("open failed\n");
 		exit(0);
 	}
 	external_log_offset = 0;
+
+	size = size*1024*1024*1024; //6G
+	my_malloc_init(size);
 
 //	printf("create background_flush_thread:%d\n", pthread_create(&background_pid, NULL, background_flush_thread, NULL));
 	if(pthread_create(&background_pid, NULL, background_flush_thread, NULL)) {
@@ -121,7 +127,7 @@ int merge_iovec(struct cache_item** cache, struct iovec* vec, int count, uint64_
 	int i;
 	uint64_t internal_offset;
 
-	if(vec == NULL || count < 0 )
+	if(vec == NULL || count <= 0 )
 		return 0;
 
 	(*cache) = malloc(sizeof(struct cache_item));
@@ -133,8 +139,9 @@ int merge_iovec(struct cache_item** cache, struct iovec* vec, int count, uint64_
 	for(i = 0;i < count;i++) {
 		(*cache)->size += vec[i].iov_len;
 	}
-	(*cache)->data = malloc((*cache)->size);
-	printf("malloc cache_item data, size:%lu\n", (*cache)->size);
+	(*cache)->data = my_malloc((*cache)->size);
+	(*cache)->original_size = (*cache)->size;
+//	printf("malloc cache_item data, size:%lu\n", (*cache)->size);
 	for(i = 0, internal_offset = 0;i < count;i++) {
 		memcpy((*cache)->data + internal_offset, vec[i].iov_base, vec[i].iov_len);
 		internal_offset += vec[i].iov_len;
@@ -177,19 +184,20 @@ static void deal_with_overlap(struct cache_item* item) {
 			break;
 		} else if(item->offset + item->size > p->offset && 
 					item->offset + item->size < p->offset + p->size) {
-			printf("free in deal_with_overlap:%lu\n", p->size);
+	//		printf("free in deal_with_overlap:%lu\n", p->size);
 			p->size = p->offset + p->size - (item->offset + item->size);
-			char* tmp = malloc(p->size);
-			printf("malloc in deal_with_overlap:%lu\n", p->size);
+			char* tmp = my_malloc(p->size);
+	//		printf("malloc in deal_with_overlap:%lu\n", p->size);
 			memcpy(tmp, p->data + item->offset + item->size - p->offset, p->size);
 			p->offset = item->offset + item->size;
 
-			free(p->data);
+			my_free(p->data, p->original_size);
+			p->original_size = p->size;
 			p->data = tmp;
 			break;
 		} else {
 			item->next = p->next;
-			free(p->data);
+			my_free(p->data, p->original_size);
 			free(p);
 			p = item->next;
 		}
@@ -225,20 +233,21 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 			p = *head;
 			*head = data;
 			data->next = p;
-			tmp = malloc(end);
+			tmp = my_malloc(end);
 			memcpy(tmp, p->data + overlap, end);
-			free(p->data);
+			my_free(p->data, p->original_size);
 			p->data = tmp;
 			p->size = end;
+			p->original_size = end;
 			p->offset = p->offset + overlap;
 			data->is_dirty = 1;
-			p->is_dirty = 1;
 		} else {
 			memcpy((*head)->data, data->data + front, overlap);
 			data->size = front;
-			tmp = malloc(front);
+			tmp = my_malloc(front);
 			memcpy(tmp, data->data, front);
-			free(data->data);
+			my_free(data->data, data->original_size);
+			data->original_size = front;
 			data->data = tmp;
 			p = *head;
 			*head = data;
@@ -252,7 +261,7 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 		(*head) = data;
 		data->next = tmp->next;
 		//check_continue(*head, data);
-		free(tmp->data);
+		my_free(tmp->data, tmp->original_size);
 		free(tmp);
 		deal_with_overlap(data);
 	} else if(a1 < b1 && b1 < a2 && a2 < b2) {
@@ -266,20 +275,22 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 			p = (*head)->next;
 			(*head)->next = data;
 			data->next = p;
-			tmp = malloc(front);
+			tmp = my_malloc(front);
 			memcpy(tmp, (*head)->data, front);
-			free((*head)->data);
+			my_free((*head)->data, (*head)->original_size);
 			(*head)->data = tmp;
 			(*head)->size = front;
+			(*head)->original_size = front;
 		} else {
 			memcpy((*head)->data + front, data->data, overlap);
 			(*head)->version++;
-			tmp = malloc(end);
+			tmp = my_malloc(end);
 			memcpy(tmp, data->data + overlap, end);
-			free(data->data);
+			my_free(data->data, data->original_size);
 			data->data = tmp;
 			data->offset = data->offset + overlap;
 			data->size = end;
+			data->original_size = end;
 			p = (*head)->next;
 			(*head)->next = data;
 			data->next = p;
@@ -287,36 +298,40 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 			(*head)->is_dirty = 1;
 		}
 		deal_with_overlap(data);
-	} else if(a1 <= b1 && b2 <= a2) {
+	} else if(a1 < b1 && b2 < a2) {
 		if(b2 - b1 <= a2 - a1 - (b2 - b1)) {
 			memcpy((*head)->data + b1 - a1, data->data, b2 - b1);
 			(*head)->is_dirty = 1;
 			(*head)->version++;
-			free(data->data);
+			my_free(data->data, data->original_size);
 			free(data);
 		} else {
 			char* head_data = (*head)->data;
+			uint64_t free_size = (*head)->original_size;
 			struct cache_item* next = (*head)->next;
 			if(b1 - a1) {
-				char* tmp = malloc(b1 - a1);
+				char* tmp = my_malloc(b1 - a1);
 				memcpy(tmp, head_data, b1 - a1);
+				(*head)->original_size = b1 -a1;
 				(*head)->size = b1 - a1;
 				(*head)->data = tmp;
 				(*head)->next = data;
 				data->next = next;
 			}
 			if(a2 - b2) {
-				char* tmp = malloc(a2 - b2);
+				char* tmp = my_malloc(a2 - b2);
 				memcpy(tmp, head_data + b2 - a1, a2 - b2);
 				struct cache_item* cache = malloc(sizeof(struct cache_item));
 				cache->is_dirty = 1;
+				cache->version = 0;
 				cache->size = a2 - b2;
+				cache->original_size = a2 - b2;
 				cache->offset = b2;
 				cache->data = tmp;
 				cache->next = data->next;
 				data->next = cache;
 			}
-			free(head_data);
+			my_free(head_data, free_size);
 		}
 	} else {
 		insert_cache_item(&((*head)->next), data);
@@ -349,17 +364,18 @@ int insert_item(int fd, struct iovec *vec, int count, uint64_t offset) {
 	if(count < 1 || fd < 0 || fd >= NUM_FD || vec == NULL)
 		return 0;
 
-	pthread_mutex_lock (&file_map_lock);
+//	pthread_mutex_lock (&file_map_lock);
 	if(file_map[fd] == NULL) {
-		pthread_mutex_unlock (&file_map_lock);
+//		pthread_mutex_unlock (&file_map_lock);
 		printf("error in insert_item.\n");
 		return 0;
 	} else {
+//		filename = my_malloc(strlen(file_map[fd]) + 1);
 		filename = malloc(strlen(file_map[fd]) + 1);
 		strcpy(filename, file_map[fd]);
-		filename[strlen(file_map[fd])] = '\0';
+//		filename[strlen(file_map[fd])] = '\0';
 	}
-	pthread_mutex_unlock (&file_map_lock);
+//	pthread_mutex_unlock (&file_map_lock);
 
 	ret = merge_iovec(&tmp, vec, count, offset);
 
@@ -376,11 +392,15 @@ int insert_item(int fd, struct iovec *vec, int count, uint64_t offset) {
 			(*p)->pathname = malloc(strlen(filename) + 1);
 			strcpy((*p)->pathname, filename);
 			(*p)->is_dirty = 1;
-			(*p)->pathname[strlen(filename)] = '\0';
 			(*p)->next = NULL;
 			(*p)->head = tmp;
 			time(&(*p)->mtime);
-			(*p)->is_dirty = tmp->size;
+			(*p)->root = ALLOC_QUEUE_ROOT();
+			if(pthread_create(&(*p)->background_pid, NULL, background_write_fn, (void*) (*p)->root)) {
+				printf("create backgound_write_fn failed\n");
+				exit(0);
+			}
+			(*p)->dirty_size = tmp->size;
 			(*p)->size = tmp->size;
 			(*p)->blocks = (tmp->size + BLOCK_SIZE - 1)/ BLOCK_SIZE;
 			break;
@@ -400,6 +420,8 @@ int insert_item(int fd, struct iovec *vec, int count, uint64_t offset) {
 		}
 		p = &((*p)->next);
 	}
+//	my_free(filename, strlen(file_map[fd]) + 1);
+	free(filename);
 	//printf("insert unlock:%d", hash_value);
 	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	return ret;
@@ -616,10 +638,10 @@ int external_log_read(int fd, struct read_record** record, uint64_t size, uint64
 	return 0;
 }
 
-void *write_to_real_path(void* item) {
-//	struct cache_item* p;
-	struct write_to_real_path_para* paras = (struct write_to_real_path_para*)item;
-	struct descriptor_block* desc = (struct descriptor_block*)paras->records;
+void *background_write_fn(void* obj) {
+	struct queue_root* root = (struct queue_root*) obj;
+	struct write_to_real_path_para* paras;
+	struct descriptor_block* desc;
 	char* filename;
 	char* data;
 	struct record_item* records;
@@ -627,58 +649,131 @@ void *write_to_real_path(void* item) {
 	struct hash_item* h_item;
 	struct cache_item** head;
 	struct cache_item* next;
-
-	filename = malloc(desc->path_size + 1);
-	memcpy(filename, (char*) (paras->records) + sizeof(struct descriptor_block), desc->path_size);
-	filename[desc->path_size] = '\0';
-	records = (struct record_item*)((char*)(paras->records)  + sizeof(struct descriptor_block) + desc->path_size);
-	data = paras->data;//(char*) records + desc->num_of_item*sizeof(struct record_item);
-
 	int fd;
-	fd = open(filename, O_WRONLY);
-	if(fd > 0) {
-		for(i = 0;i < desc->num_of_item;i++) {
-			pwrite(fd, data, records[i].size, records[i].offset);
-			data += records[i].size;
-		}
-	}
+	struct queue_head* item;
+	uint64_t data_size;
+	uint64_t free_data_size = 0;
 
-	free(paras->data);
+	while(1) {
+		item = queue_get(root);
+		printf("free_data_size%lu\n", free_data_size);
+		if(item) {
+			paras = (struct write_to_real_path_para*) item->data;
+			desc = (struct descriptor_block*)paras->records;
+			filename = malloc(desc->path_size + 1);
+			memcpy(filename, (char*) (paras->records) + sizeof(struct descriptor_block), desc->path_size);
+			filename[desc->path_size] = '\0';
+			records = (struct record_item*)((char*)(paras->records)  + sizeof(struct descriptor_block) + desc->path_size);
+			data = paras->data;//(char*) records + desc->num_of_item*sizeof(struct record_item);
 
-	int hash_value = external_log_hash(filename, HASH_ITEM_NUM);
-	//printf("write try lock %d.\n", hash_value);
-	pthread_mutex_lock(&hashtable_locks[hash_value]);
-	//printf("write already lock %d\n", hash_value);
-	h_item = hashtable[hash_value];
-	while(h_item != NULL) {
-		if(!strcmp(h_item->pathname, filename)) {
-			head = &(h_item->head);
-			for(i = 0;i < desc->num_of_item;i++) {
-				while(*head != NULL) {
-					if((*head)->is_dirty == 0 && (*head)->offset >= records[i].offset &&
-						(*head)->offset + (*head)->size >= records[i].offset + records[i].size &&
-						(*head)->version == records[i].version) {
-						next = (*head)->next;
-						free((*head)->data);
-						free((*head));
-						(*head) = next;
-					} else if((*head)->offset >= records[i].offset + records[i].size){
-						break;
-					} else {
-						*head = (*head)->next;
-					}
+
+			data_size = 0;
+
+			fd = open(filename, O_WRONLY);
+			if(fd > 0) {
+				for(i = 0;i < desc->num_of_item;i++) {
+					pwrite(fd, data, records[i].size, records[i].offset);
+					data += records[i].size;
+					data_size += records[i].size;
 				}
-			}		
-			break;
+			} else {
+				printf("open %s failed \n", filename);
+			}
+
+			free_data_size += data_size;
+
+			my_free(paras->data, data_size + sizeof(struct commit_block));
+//			free(paras->data);
+			int hash_value = external_log_hash(filename, HASH_ITEM_NUM);
+			//printf("write try lock %d.\n", hash_value);
+			pthread_mutex_lock(&hashtable_locks[hash_value]);
+			//printf("write already lock %d\n", hash_value);
+			h_item = hashtable[hash_value];
+			while(h_item != NULL) {
+				if(!strcmp(h_item->pathname, filename)) {
+					head = &(h_item->head);
+					for(i = 0;i < desc->num_of_item;i++) {
+						while(*head != NULL) {
+							if((*head)->is_dirty == 0 && (*head)->offset >= records[i].offset &&
+								(*head)->offset + (*head)->size >= records[i].offset + records[i].size &&
+								(*head)->version == records[i].version) {
+								next = (*head)->next;
+								printf("*head%p  data:%p\n", *head, (*head)->data);
+
+								my_free((*head)->data, (*head)->original_size);
+								free(*head);
+								(*head) = next;
+
+							} else if((*head)->offset >= records[i].offset + records[i].size){
+								break;
+							} else {
+								head = &((*head)->next);
+							}
+						}
+					}		
+					break;
+				}
+				h_item = h_item->next;
+			}
+			//printf("write to unlock %d", hash_value);
+			pthread_mutex_unlock(&hashtable_locks[hash_value]);
+//			free(paras->records);
+			my_free(paras->records, sizeof(struct descriptor_block) + desc->path_size + 
+					desc->num_of_item*sizeof(struct record_item));
+			free(paras);
+			free(filename);
+			free(item);
+			
+/*			my_free(paras, sizeof(struct write_to_real_path_para));
+			my_free(filename, strlen(filename) + 1);
+			my_free(item, sizeof(struct queue_head));
+*/		} else {
+			sleep(1);
 		}
-		h_item = h_item->next;
 	}
-	//printf("write to unlock %d", hash_value);
-	pthread_mutex_unlock(&hashtable_locks[hash_value]);
-	free(paras->records);
-	free(item);
-	free(filename);
 	return NULL;
+}
+
+void destroy_cache_item(struct cache_item* item) {
+	struct cache_item* next;
+
+	if(item == NULL) {
+		return;
+	}
+	next = item->next;
+	if(item->data != NULL)
+		my_free(item->data, item->original_size);
+	destroy_cache_item(next);
+	free(item);
+}
+
+void destroy_hash_item2(struct hash_item** item) {
+	struct hash_item* next;
+
+	if(*item == NULL)
+		return;
+
+	next = (*item)->next;
+	if((*item)->pathname != NULL)
+		free((*item)->pathname);
+	destroy_cache_item((*item)->head);
+	free(*item);
+	*item = next;
+}
+
+void destroy_hash_item(struct hash_item* item) {
+	struct hash_item* next;
+
+	if(item == NULL) {
+		return;
+	}
+
+	next = item->next;
+	if(item->pathname != NULL)
+		free(item->pathname);
+	destroy_cache_item(item->head);
+	destroy_hash_item(next);
+	free(item);
 }
 
 
@@ -725,10 +820,12 @@ int external_log_flush(struct hash_item* item, pthread_mutex_t* lock) {
 			strlen(item->pathname) + item_num*(sizeof(struct record_item));
 //	log_item = malloc(desc_size);
 //	data = malloc(size + sizeof(struct commit_block));
-	posix_memalign((void*)&log_item, BLOCK_SIZE, desc_size);
+	my_posix_memalign((void*)&log_item, BLOCK_SIZE, desc_size);
+	my_posix_memalign((void*)&data, BLOCK_SIZE, size + sizeof(struct commit_block));
+
+/*	posix_memalign((void*)&log_item, BLOCK_SIZE, desc_size);
 	posix_memalign((void*)&data, BLOCK_SIZE, size + sizeof(struct commit_block));
-
-
+*/
 	pthread_mutex_lock(&external_log_offset_lock);
 	offset = external_log_offset;
 	external_log_offset += UPPER(desc_size + size + sizeof(struct commit_block), BLOCK_SIZE);	
@@ -782,8 +879,11 @@ int external_log_flush(struct hash_item* item, pthread_mutex_t* lock) {
 	pwrite(external_log_fd, data, size + sizeof(struct commit_block), offset + desc_size);
 	ret = fsync(external_log_fd);
 	if(ret < 0) {
-		free(data);
+		/*
+		my_free(log_item, desc_size);
+		my_free(data, size + sizeof(struct commit_block));*/
 		free(log_item);
+		free(data);
 		goto out;
 	}
 	struct write_to_real_path_para* paras = malloc(sizeof (struct write_to_real_path_para));
@@ -791,12 +891,18 @@ int external_log_flush(struct hash_item* item, pthread_mutex_t* lock) {
 		paras->data = data;
 		paras->records = log_item;
 	}
-	pthread_t pid;
-	pthread_create(&pid, NULL, write_to_real_path, (void*) paras);
+	struct queue_head* q = malloc(sizeof(struct queue_head));
+	q->data = (void*) paras;
+	q->next = NULL;
+	queue_put((void*) q, item->root);
+/*	pthread_t pid;
+	pthread_create(&pid, NULL, write_to_real_path, (void*) paras);*/
 
 out:
 	return ret;
 }
+
+
 
 int external_log_flush_for_fsync(int fd) {
 	int ret = 0;
@@ -826,16 +932,16 @@ int external_log_flush_for_fsync(int fd) {
 	return ret;
 }
 
-
+/*
 
 static struct iovec* get_iovec(int count, char flag) {
 	struct iovec* vec;
 	int i,j;
 
-	vec = malloc(sizeof(struct iovec)*count);
+	vec = my_malloc(sizeof(struct iovec)*count);
 	for(i = 0;i < count;i++) {
 		vec[i].iov_len = i + 1;
-		vec[i].iov_base = malloc(i + 1);
+		vec[i].iov_base = my_malloc(i + 1);
 		for(j = 0;j < vec[i].iov_len;j++) {
 			((char*)vec[i].iov_base)[j] = flag;
 		}
@@ -884,7 +990,7 @@ static int external_log_init_for_test() {
 	}
 
 	for(i = 0;i < NUM_FD;i++) {
-		file_map[i] = malloc(i + 2);
+		file_map[i] = my_malloc(i + 2);
 		for(j = 0;j < i + 1;j++) {
 			file_map[i][j] = 'a';
 		}
@@ -904,47 +1010,6 @@ static int external_log_init_for_test() {
 	return 0;
 }
 
-void destroy_cache_item(struct cache_item* item) {
-	struct cache_item* next;
-
-	if(item == NULL) {
-		return;
-	}
-	next = item->next;
-	if(item->data != NULL)
-		free(item->data);
-	destroy_cache_item(next);
-	free(item);
-}
-
-void destroy_hash_item2(struct hash_item** item) {
-	struct hash_item* next;
-
-	if(*item == NULL)
-		return;
-
-	next = (*item)->next;
-	if((*item)->pathname != NULL)
-		free((*item)->pathname);
-	destroy_cache_item((*item)->head);
-	free(*item);
-	*item = next;
-}
-
-void destroy_hash_item(struct hash_item* item) {
-	struct hash_item* next;
-
-	if(item == NULL) {
-		return;
-	}
-
-	next = item->next;
-	if(item->pathname != NULL)
-		free(item->pathname);
-	destroy_cache_item(item->head);
-	destroy_hash_item(next);
-	free(item);
-}
 
 static int external_log_finish_for_test() {
 	int i;
@@ -1036,13 +1101,12 @@ void insert_item_test() {
 }
 
 void fsync_test() {
-/*	int i;
+	int i;
 
 	for(i = 0;i < HASH_ITEM_NUM;i++) {
 		if(hashtable[i] != NULL)
 			external_log_flush(hashtable[i]);
 	}
-*/
 }
 
 void show_log_content() {
@@ -1066,7 +1130,7 @@ void show_log_content() {
 	while(d->sig == EXTERNAL_LOG_METADATA_BLOCK_SIG) {
 		desc_p = desc + sizeof(struct descriptor_block);
 		c = (struct commit_block*) commit;
-		pathname = malloc(d->path_size + 1);
+		pathname = my_malloc(d->path_size + 1);
 		memcpy(pathname, desc_p, d->path_size);
 		pathname[d->path_size] = '\0';
 		desc_p += d->path_size;
@@ -1100,7 +1164,7 @@ int main() {
 	if(rec == NULL) {
 		printf("null\n");
 	} else {
-		printf("%s  %lu %lu\n", rec->data, rec->offset, rec->size);
+		printf("%s  %lu %lu\n", (char*)rec->data, rec->offset, rec->size);
 	}
 	show_log_content();
 	external_log_finish_for_test();
@@ -1108,3 +1172,4 @@ int main() {
 
 
 }
+*/

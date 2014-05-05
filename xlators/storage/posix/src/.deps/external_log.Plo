@@ -36,7 +36,7 @@ external_log.lo: external_log.c /usr/include/pthread.h \
  /usr/include/x86_64-linux-gnu/bits/confname.h /usr/include/getopt.h \
  /usr/include/fcntl.h /usr/include/x86_64-linux-gnu/bits/fcntl.h \
  /usr/lib/gcc/x86_64-linux-gnu/4.7/include/stdint.h /usr/include/stdint.h \
- /usr/include/x86_64-linux-gnu/bits/wchar.h util.h external_log.h
+ /usr/include/x86_64-linux-gnu/bits/wchar.h queue.h util.h external_log.h
 
 /usr/include/pthread.h:
 
@@ -145,6 +145,8 @@ external_log.lo: external_log.c /usr/include/pthread.h \
 /usr/include/stdint.h:
 
 /usr/include/x86_64-linux-gnu/bits/wchar.h:
+
+queue.h:
 
 util.h:
 

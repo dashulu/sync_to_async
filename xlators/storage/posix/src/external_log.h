@@ -5,19 +5,24 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
+#include "queue.h"
 
+#ifndef EXTERNAL_LOG_H
+#define EXTERNAL_LOG_H
 
 struct read_record {
-	char* data;
+	void* data;
 	uint64_t size;
 	uint64_t offset;
 	struct read_record* next;
 };
 
+
 struct write_to_real_path_para{
-	char* data;
 	char* records;
+	char* data;
 };
+
 
 
 // log structure in the disk
@@ -61,21 +66,26 @@ struct record_of_data {
 struct cache_item {
 	char* data;
 	uint64_t size;
+	uint64_t original_size;
 	uint64_t offset;
 	int is_dirty;
 	uint32_t version;
 //	bool is_commiting;
 	struct cache_item* next;
-	pthread_mutex_t lock;
+//	pthread_mutex_t lock;
 };
 
 struct hash_item {
 	char* pathname;
 	int is_dirty;
-	uint32_t dirty_size; 
+	uint64_t dirty_size; 
 	int64_t size;
 	int64_t blocks;
 	time_t mtime;
+
+	pthread_t background_pid;
+	struct queue_root* root;
+
 
 //	pthread_mutex_t lock;
 //	bool is_dirty;
@@ -89,7 +99,8 @@ struct hash_item {
 #define HASH_ITEM_NUM 4099
 #define EXTERNAL_LOG_METADATA_BLOCK_SIG 0xbeefbeef
 #define BLOCK_SIZE 4096
-#define MAX_DIRTY_SIZE 52428800  // 50M
+#define MAX_DIRTY_SIZE 524288000  // 500M
+#define TIME_TO_FLUSH 5
 
 #define EXTERNAL_LOG_WRITEV 1
 #define EXTERNAL_LOG_TRUNCATE 2
@@ -126,3 +137,6 @@ int external_log_read(int fd, struct read_record** record, uint64_t size, uint64
 int external_log_stat(const char* path, struct stat* obj);
 int external_log_truncate(const char* path, uint64_t size);
 int external_log_unlink(const char* path);
+
+
+#endif

@@ -118,7 +118,7 @@ posix-helpers.lo: posix-helpers.c ../../../../config.h \
  /usr/include/rpc/rpc_msg.h /usr/include/rpc/auth_unix.h \
  /usr/include/rpc/auth_des.h /usr/include/rpc/svc.h \
  /usr/include/rpc/svc_auth.h ../../../../libglusterfs/src/hashfn.h \
- /usr/include/fnmatch.h external_log.h
+ /usr/include/fnmatch.h external_log.h queue.h
 
 ../../../../config.h:
 
@@ -453,3 +453,5 @@ posix-aio.h:
 /usr/include/fnmatch.h:
 
 external_log.h:
+
+queue.h:
