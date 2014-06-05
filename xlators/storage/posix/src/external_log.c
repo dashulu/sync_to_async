@@ -1,5 +1,6 @@
 #include <pthread.h>
 #include <sys/uio.h>
+#include <sys/mman.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -17,6 +18,259 @@ int external_log_flush(struct hash_item* item, pthread_mutex_t* lock);
 void destroy_hash_item2(struct hash_item** item);
 void destroy_cache_item(struct cache_item* item);
 void *background_write_fn(void* obj);
+static void log_op(int op, const char* path, void* obj);
+
+
+
+void segment_tree_insert(struct segment_tree_node* root, struct cache_item* data) {
+//	printf("data->offset:%lu data->size:%lu\n", data->offset, data->size);
+
+	if(data->offset + data->size <= root->item->offset) {
+		if(root->left != NULL) {
+			segment_tree_insert(root->left, data);
+		} else {
+			root->left = malloc(sizeof(struct segment_tree_node));
+			root->left->left = NULL;
+			root->left->right = NULL;
+			root->left->parent = root;
+			root->left->item = data;
+		}
+	} else if(data->offset >= root->item->offset + root->item->size) {
+		if(root->right != NULL) {
+			segment_tree_insert(root->right, data);
+		} else {
+			root->right = malloc(sizeof(struct segment_tree_node));
+			root->right->left = NULL;
+			root->right->right = NULL;
+			root->right->parent = root;
+			root->right->item = data;
+		}
+	} else if(data->offset >= root->item->offset && 
+			root->item->offset + root->item->size >= data->offset + data->size) {
+		memcpy(root->item->data + data->offset - root->item->offset, data->data, data->size);
+		root->item->is_dirty = 1;
+		my_free(data->data, data->original_size);
+		free(data);
+	} else if(data->offset < root->item->offset && 
+			root->item->offset + root->item->size >= data->offset + data->size) {
+
+		memcpy(root->item->data, data->data + root->item->offset - data->offset, 
+				data->size - (root->item->offset - data->offset));
+		root->item->is_dirty = 1;
+		data->size = root->item->offset - data->offset;
+		if(root->left != NULL) {
+			segment_tree_insert(root->left, data);
+		} else {
+			root->left = malloc(sizeof(struct segment_tree_node));
+			root->left->left = NULL;
+			root->left->right = NULL;
+			root->left->parent = root;
+			root->left->item = data;
+		}
+	} else if(data->offset >= root->item->offset &&
+			data->offset + data->size > root->item->offset + root->item->size) {
+
+		memcpy(root->item->data + data->offset - root->item->offset, data->data, 
+				(root->item->offset + root->item->size - data->offset));
+		root->item->is_dirty = 1;
+		data->size = data->size + data->offset - (root->item->offset + root->item->size);
+		data->offset = root->item->offset + root->item->size; 
+		char* tmp = my_malloc(data->size);
+		memcpy(tmp, data->data + root->item->size + root->item->offset - data->offset,
+				data->size);
+		my_free(data->data, data->original_size);
+		data->original_size = data->size;
+		data->data = tmp;
+
+		if(root->right != NULL) {
+			segment_tree_insert(root->right, data);
+		} else {
+			root->right = malloc(sizeof(struct segment_tree_node));
+			root->right->left = NULL;
+			root->right->right = NULL;
+			root->right->parent = root;
+			root->right->item = data;
+		}
+	} else {
+		memcpy(root->item->data, data->data + root->item->offset - data->offset, 
+				root->item->size);
+		root->item->is_dirty = 1;
+
+		struct cache_item* right = malloc(sizeof(struct cache_item));
+		right->size = data->size + data->offset - (root->item->offset + root->item->size);
+		right->offset = root->item->size + root->item->offset;
+		right->original_size = right->size;
+		right->is_dirty = 1;
+		right->data = my_malloc(right->size);
+		memcpy(right->data, data->data + root->item->size + root->item->offset - data->offset,
+				right->size);
+		if(root->right != NULL) {
+			segment_tree_insert(root->right, right);
+		} else {
+			root->right = malloc(sizeof(struct segment_tree_node));
+			root->right->left = NULL;
+			root->right->right = NULL;
+			root->right->parent = root;
+			root->right->item = right;
+		}
+
+		struct cache_item* left = malloc(sizeof(struct cache_item));
+		left->size = root->item->offset - data->offset;
+		left->offset = data->offset;
+		left->original_size = left->size;
+		left->is_dirty = 1;
+		left->data = my_malloc(left->size);
+		memcpy(left->data, data->data, left->size);
+		if(root->left != NULL) {
+			segment_tree_insert(root->left, left);
+		} else {
+			root->left = malloc(sizeof(struct segment_tree_node));
+			root->left->left = NULL;
+			root->left->right = NULL;
+			root->left->parent = root;
+			root->left->item = left;
+		}
+
+		my_free(data->data, data->original_size);
+		free(data);
+	}
+}
+
+void segment_tree_read(struct segment_tree_node* root, struct read_record** record, uint64_t size, uint64_t offset) {
+
+	if(root == NULL) {
+		return;
+	} else if(root->item->offset >= size + offset) {
+		segment_tree_read(root->left, record, size, offset);
+	} else if(root->item->offset + root->item->size <= offset) {
+		segment_tree_read(root->right, record, size, offset);
+	} else if(root->item->offset <= offset && 
+				root->item->offset + root->item->size >= size + offset ) {
+		struct read_record* tmp = malloc(sizeof(struct read_record));
+		tmp->size = size;
+		tmp->offset = offset;
+		tmp->data = malloc(size);
+		memcpy(tmp->data, root->item->data + offset - root->item->offset, size);
+		tmp->next = *record;
+		*record = tmp;
+	} else if(offset < root->item->offset && root->item->offset + root->item->size >= offset + size) {
+		struct read_record* tmp = malloc(sizeof(struct read_record));
+		tmp->size = offset + size - root->item->offset;
+		tmp->offset = root->item->offset;
+		tmp->data = malloc(tmp->size);
+		memcpy(tmp->data, root->item->data, tmp->size);
+		tmp->next = *record;
+		*record = tmp;
+		segment_tree_read(root->left, record, size - tmp->size, offset);
+	} else if(offset >= root->item->offset && 
+				root->item->offset + root->item->size < size + offset) {
+		struct read_record* tmp = malloc(sizeof(struct read_record));
+		tmp->size = root->item->offset + root->item->size - offset;
+		tmp->offset = offset;
+		tmp->data = malloc(tmp->size);
+		memcpy(tmp->data, root->item->data + offset - root->item->offset, tmp->size);
+		tmp->next = *record;
+		*record = tmp;
+		segment_tree_read(root->right, record, size - tmp->size, offset + tmp->size);
+	} else {
+		struct read_record* tmp = malloc(sizeof(struct read_record));
+		tmp->size = root->item->size;
+		tmp->offset = root->item->offset;
+		tmp->data = malloc(tmp->size);
+		memcpy(tmp->data, root->item->data, tmp->size);
+		tmp->next = *record;
+		*record = tmp;
+		segment_tree_read(root->left, record, root->item->offset - offset, offset);
+		segment_tree_read(root->right, record, 
+						offset + size - (root->item->offset + root->item->size),
+						root->item->offset + root->item->size);
+	}
+}
+
+static uint64_t get_size(struct segment_tree_node* root, int *count) {
+	if(root == NULL)
+		return 0;
+	(*count)++;
+	return root->item->size + get_size(root->left, count) + get_size(root->right, count);
+}
+
+static void segment_tree_fsync_helper(struct segment_tree_node* root, char* ptr, int *count,
+										void* desc, int *desc_count) {
+	if(root == NULL)
+		return;
+	memcpy(ptr + (*count), root->item->data, root->item->size);
+	(*count) += root->item->size;
+	char* tmp = ((char*)desc + (*desc_count)*sizeof(struct record_item));
+	*((uint64_t*) tmp) = root->item->size;
+	tmp += sizeof(uint64_t);
+	*((uint64_t*) tmp) = root->item->offset;
+	tmp += sizeof(uint64_t);
+	*((uint64_t*) tmp) = root->item->version;
+	(*desc_count)++;
+	segment_tree_fsync_helper(root->left, ptr, count, desc, desc_count);
+	segment_tree_fsync_helper(root->right, ptr, count, desc, desc_count);
+}
+
+void segment_tree_fsync(struct hash_item* item) {
+	uint64_t data_size = 0;
+	uint64_t desc_size = 0;
+	uint64_t total_size = 0;
+	int count = 0;
+	uint64_t local_external_offset;
+	uint64_t local_external_id;
+	void* ptr;
+	void* ptr_copy;
+	char* data_copy;
+
+	data_size = get_size(item->tree_root, &count);
+	desc_size = sizeof(struct descriptor_block) + strlen(item->pathname) + 
+				count*sizeof(struct record_item);
+	total_size = UPPER(data_size + desc_size + sizeof(struct commit_block), BLOCK_SIZE);
+
+	pthread_mutex_lock(&external_log_id_lock);
+	local_external_id = external_log_id;
+	external_log_id++;
+	pthread_mutex_unlock(&external_log_id_lock);
+	pthread_mutex_lock(&external_log_offset_lock);
+	local_external_offset = external_log_offset;
+	external_log_offset += total_size;
+	pthread_mutex_unlock(&external_log_offset_lock);
+
+	ptr = mmap(NULL, total_size, PROT_WRITE, MAP_SHARED, external_log_fd, local_external_offset);
+
+	if(ptr == (void*)-1) {
+		printf("mmap failed:total size%lu offset:%lu\n", total_size, local_external_offset);
+		exit(1);
+	}
+	ptr_copy = ptr;
+	*((uint32_t*) ptr_copy) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
+	ptr_copy = ptr_copy + sizeof(uint32_t);
+	*((uint32_t*) ptr_copy) = local_external_id;
+	ptr_copy += sizeof(uint32_t);
+	*((uint32_t*) ptr_copy) = EXTERNAL_LOG_WRITEV;
+	ptr_copy += sizeof(uint32_t);
+	*((int *) ptr_copy) = count;
+	ptr_copy += sizeof(int);
+	*((int *) ptr_copy) = strlen(item->pathname);
+	ptr_copy += sizeof(int);
+	memcpy(ptr_copy, item->pathname, strlen(item->pathname));
+	ptr_copy += strlen(item->pathname);
+
+	data_copy = (char*)ptr;
+	data_copy += desc_size;
+
+	int data_count = 0;
+	int desc_count = 0;
+	segment_tree_fsync_helper(item->tree_root, data_copy, &data_count, ptr_copy, &desc_count);
+	data_copy += data_size;
+	*((uint32_t*) data_copy) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
+	data_copy += sizeof(uint32_t);
+	*((uint32_t*) data_copy) = local_external_id;
+	msync(ptr, total_size, MS_SYNC);
+	munmap(ptr, total_size);
+}
+
+
 
 void *background_flush_thread(void* obj) {
     int i = 0;
@@ -69,15 +323,15 @@ int external_log_init() {
 		pthread_mutex_init (&hashtable_locks[i], NULL); 
 	}
 
-	for(i = 0;i < NUM_FD;i++) {
+/*	for(i = 0;i < NUM_FD;i++) {
 		file_map[i] = NULL;
 	}
-
+*/
 	pthread_mutex_init(&file_map_lock, NULL);
 	pthread_mutex_init(&external_log_id_lock, NULL);
 	pthread_mutex_init(&external_log_offset_lock, NULL);
 	
-	external_log_fd = open("/home/dashu/sdb1/external_log", O_RDWR);
+	external_log_fd = open("/home/user/sdb1/external_log", O_RDWR);
 	if(external_log_fd <= 0) {
 		printf("open failed\n");
 		exit(0);
@@ -113,7 +367,9 @@ int external_log_finish() {
 	pthread_mutex_destroy(&tmp);
 
 	for(i = 0;i < NUM_FD;i++) {
-		free(file_map[i]);
+//		free(file_map[i]);
+		if(fd_inode_map[i].name != NULL)
+			free(fd_inode_map[i].name);
 	}
 	pthread_mutex_destroy(&file_map_lock);
 	pthread_mutex_destroy(&external_log_id_lock);
@@ -147,6 +403,32 @@ int merge_iovec(struct cache_item** cache, struct iovec* vec, int count, uint64_
 		internal_offset += vec[i].iov_len;
 	}
 	return internal_offset;
+}
+
+int external_log_rename(uint64_t ino, const char* old_name, char* new_name) {
+	int i;
+	int hash_value;
+
+	for(i = 0;i < NUM_FD;i++) {
+		if(ino == fd_inode_map[i].inode_num) {
+			log_op(EXTERNAL_LOG_RENAME, old_name, (void*) new_name);
+			hash_value = external_log_hash(ino, HASH_ITEM_NUM);
+			pthread_mutex_lock(&hashtable_locks[hash_value]);
+			if(fd_inode_map[i].name != NULL) {
+				free(fd_inode_map[i].name);
+				fd_inode_map[i].name = malloc(strlen(new_name) + 1);
+				strcpy(fd_inode_map[i].name, new_name);
+//				int hash_value = external_log_hash(fd_inode_map[i].ino, HASH_ITEM_NUM);
+				free(hashtable[hash_value]->pathname);
+				hashtable[hash_value]->pathname = malloc(strlen(new_name) + 1);
+				strcpy(hashtable[hash_value]->pathname, new_name);
+			}
+			pthread_mutex_unlock(&hashtable_locks[hash_value]);
+			break;
+		}
+	}
+
+	return 0;
 }
 
 uint64_t calculate(struct cache_item* item) {
@@ -338,7 +620,7 @@ static void insert_cache_item(struct cache_item** head, struct cache_item* data)
 	}
 }
 
-
+/*
 unsigned int external_log_hash(const char* str, int upper_bound) {
 	unsigned int h;
 	unsigned char *p;
@@ -346,10 +628,20 @@ unsigned int external_log_hash(const char* str, int upper_bound) {
 	if(!str)
 		return 0;
 
+	if(!strcmp("/home/dashu/sdb2/file1", str) || 
+		!strcmp("/home/dashu/sdb2/file2", str) || 
+		!strcmp("/home/dashu/sdb2/dir1/file1", str)) {
+           return 100;
+     }
+
 	for(h = 0,p = (unsigned char *) str;*p; p++)
 		h = 31 * h + *p;
 
 	return h % upper_bound;
+}*/
+
+inline unsigned int external_log_hash(uint64_t num, int upper_bound) {
+	return (num % upper_bound);
 }
 
 
@@ -363,7 +655,7 @@ int insert_item(int fd, struct iovec *vec, int count, uint64_t offset) {
 
 	if(count < 1 || fd < 0 || fd >= NUM_FD || vec == NULL)
 		return 0;
-
+/*
 //	pthread_mutex_lock (&file_map_lock);
 	if(file_map[fd] == NULL) {
 //		pthread_mutex_unlock (&file_map_lock);
@@ -376,10 +668,12 @@ int insert_item(int fd, struct iovec *vec, int count, uint64_t offset) {
 //		filename[strlen(file_map[fd])] = '\0';
 	}
 //	pthread_mutex_unlock (&file_map_lock);
-
+*/
+	filename = malloc(strlen(fd_inode_map[fd].name) + 1);
+	strcpy(filename, fd_inode_map[fd].name);
 	ret = merge_iovec(&tmp, vec, count, offset);
 
-	hash_value = external_log_hash(filename, HASH_ITEM_NUM);
+	hash_value = external_log_hash(fd_inode_map[fd].inode_num, HASH_ITEM_NUM);
 
 
 	//printf("insert try lock:%d", hash_value);
@@ -390,13 +684,15 @@ int insert_item(int fd, struct iovec *vec, int count, uint64_t offset) {
 		if((*p) == NULL) {
 			(*p) = malloc(sizeof(struct hash_item));
 			(*p)->pathname = malloc(strlen(filename) + 1);
+			(*p)->inode_num = fd_inode_map[fd].inode_num;
 			strcpy((*p)->pathname, filename);
 			(*p)->is_dirty = 1;
 			(*p)->next = NULL;
+			(*p)->fd = open(filename, O_WRONLY);
 			(*p)->head = tmp;
 			time(&(*p)->mtime);
 			(*p)->root = ALLOC_QUEUE_ROOT();
-			if(pthread_create(&(*p)->background_pid, NULL, background_write_fn, (void*) (*p)->root)) {
+			if(pthread_create(&(*p)->background_pid, NULL, background_write_fn, (void*) (*p))) {
 				printf("create backgound_write_fn failed\n");
 				exit(0);
 			}
@@ -447,32 +743,52 @@ static void log_op(int op, const char* path, void* obj) {
 	pwrite(external_log_fd, path, desc.path_size, offset + sizeof(struct descriptor_block));
 	if(op == EXTERNAL_LOG_TRUNCATE)
 		pwrite(external_log_fd, (char*) obj, sizeof(uint64_t), offset + sizeof(struct descriptor_block) + desc.path_size);
+	else if(op == EXTERNAL_LOG_RENAME) {
+		pwrite(external_log_fd, (char*) obj, strlen((char*) obj) + 1, offset + sizeof(struct descriptor_block) + desc.path_size);
+	}
 //	fsync(external_log_fd);
 }
 
-int external_log_unlink(const char* path) {
+int external_log_unlink(uint64_t ino) {
 	int hash_value;
+	int i;
 
-	if(path == NULL)
-		return 0;
+	for(i = 0;i < NUM_FD;i++) {
+		if(ino == fd_inode_map[i].inode_num) {
+			log_op(EXTERNAL_LOG_UNLINK, fd_inode_map[ino].name, NULL);
+			hash_value = external_log_hash(ino, HASH_ITEM_NUM);
+			pthread_mutex_lock(&hashtable_locks[hash_value]);
+			destroy_hash_item2(&hashtable[hash_value]);
+			pthread_mutex_unlock(&hashtable_locks[hash_value]);
+			break;
+		}
+	}
 
-	log_op(EXTERNAL_LOG_UNLINK, path, NULL);
-	hash_value = external_log_hash(path, HASH_ITEM_NUM);
-	pthread_mutex_lock(&hashtable_locks[hash_value]);
-	destroy_hash_item2(&hashtable[hash_value]);
-	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	return 0;
 }
 
-int external_log_truncate(const char* path, uint64_t size) {
+int external_log_truncate(uint64_t ino, uint64_t size) {
 	int hash_value;
 	struct cache_item** item;
+	int index = -1;
 
-	if(path == NULL)
+	int i;
+
+	for(i = 0;i < NUM_FD;i++) {
+		if(ino == fd_inode_map[i].inode_num) {
+			index = i;
+			break;
+		}
+	}
+
+	if(index == -1) {
+		printf("no item in fd map\n");
 		return 0;
+	}
 
-	log_op(EXTERNAL_LOG_TRUNCATE, path, (void*)&size);
-	hash_value = external_log_hash(path, HASH_ITEM_NUM);
+
+	log_op(EXTERNAL_LOG_TRUNCATE, fd_inode_map[index].name, (void*)&size);
+	hash_value = external_log_hash(ino, HASH_ITEM_NUM);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
 	if(hashtable[hash_value]) {
 		item = &(hashtable[hash_value]->head);
@@ -497,15 +813,15 @@ int external_log_truncate(const char* path, uint64_t size) {
 	return 0;
 }
 
-int external_log_stat(const char* path, struct stat* obj) {
+int external_log_stat(uint64_t ino, struct stat* obj) {
 	int hash_value;
 	struct hash_item* item;
 
-	hash_value = external_log_hash(path, HASH_ITEM_NUM);
+	hash_value = external_log_hash(ino, HASH_ITEM_NUM);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
 	item = hashtable[hash_value];
 	while(item != NULL) {
-		if(!strcmp(item->pathname, path)) {
+		if(ino == item->inode_num) {
 			break;
 		}
 		item = item->next;
@@ -528,13 +844,13 @@ struct hash_item* get_hash_item(int fd) {
 	int hash_value;
 	struct hash_item* item;
 
-	if(file_map[fd] == NULL) 
+/*	if(file_map[fd] == NULL) 
 		return NULL;
-
-	hash_value = external_log_hash(file_map[fd], HASH_ITEM_NUM);
+*/
+	hash_value = external_log_hash(fd_inode_map[fd].inode_num, HASH_ITEM_NUM);
 	item = hashtable[hash_value];
 	while(item != NULL) {
-		if(!strcmp(item->pathname, file_map[fd])) {
+		if(item->inode_num == fd_inode_map[fd].inode_num) {
 			break;
 		}
 		item = item->next;
@@ -610,24 +926,25 @@ int external_log_read(int fd, struct read_record** record, uint64_t size, uint64
 	int hash_value;
 	struct hash_item* item;
 
-	if(file_map[fd] == NULL) {
+/*	if(file_map[fd] == NULL) {
 		*record = NULL;
 		return 0;
-	}
+	}*/
 
-	hash_value = external_log_hash(file_map[fd], HASH_ITEM_NUM);
+	hash_value = external_log_hash(fd_inode_map[fd].inode_num, HASH_ITEM_NUM);
 	//printf("read try lock:%d\n", hash_value);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
 	//printf("read already lock:%d\n", hash_value);
 	item = hashtable[hash_value];
 	while(item != NULL) {
-		if(!strcmp(item->pathname, file_map[fd])) {
+		if(item->inode_num == fd_inode_map[fd].inode_num) {
 			break;
 		}
 		item = item->next;
 	}
 	if(item == NULL) {
 		*record = NULL;
+		printf("can't find the item when read:%s ", fd_inode_map[fd].name);
 		//printf("read unlock:%d\n", hash_value);
 		pthread_mutex_unlock(&hashtable_locks[hash_value]);
 		return 0;
@@ -639,26 +956,28 @@ int external_log_read(int fd, struct read_record** record, uint64_t size, uint64
 }
 
 void *background_write_fn(void* obj) {
-	struct queue_root* root = (struct queue_root*) obj;
+	struct queue_root* root = ((struct hash_item*) obj)->root;
+	int fd = ((struct hash_item*) obj)->fd;
 	struct write_to_real_path_para* paras;
 	struct descriptor_block* desc;
 	char* filename;
 	char* data;
 	struct record_item* records;
 	int i; 
+	uint64_t ino;
 	struct hash_item* h_item;
 	struct cache_item** head;
 	struct cache_item* next;
-	int fd;
 	struct queue_head* item;
 	uint64_t data_size;
 	uint64_t free_data_size = 0;
 
 	while(1) {
 		item = queue_get(root);
-		printf("free_data_size%lu\n", free_data_size);
+//		printf("free_data_size%lu\n", free_data_size);
 		if(item) {
 			paras = (struct write_to_real_path_para*) item->data;
+			ino = paras->ino;
 			desc = (struct descriptor_block*)paras->records;
 			filename = malloc(desc->path_size + 1);
 			memcpy(filename, (char*) (paras->records) + sizeof(struct descriptor_block), desc->path_size);
@@ -669,7 +988,7 @@ void *background_write_fn(void* obj) {
 
 			data_size = 0;
 
-			fd = open(filename, O_WRONLY);
+//			fd = open(filename, O_WRONLY);
 			if(fd > 0) {
 				for(i = 0;i < desc->num_of_item;i++) {
 					pwrite(fd, data, records[i].size, records[i].offset);
@@ -684,7 +1003,7 @@ void *background_write_fn(void* obj) {
 
 			my_free(paras->data, data_size + sizeof(struct commit_block));
 //			free(paras->data);
-			int hash_value = external_log_hash(filename, HASH_ITEM_NUM);
+			int hash_value = external_log_hash(ino, HASH_ITEM_NUM);
 			//printf("write try lock %d.\n", hash_value);
 			pthread_mutex_lock(&hashtable_locks[hash_value]);
 			//printf("write already lock %d\n", hash_value);
@@ -698,7 +1017,6 @@ void *background_write_fn(void* obj) {
 								(*head)->offset + (*head)->size >= records[i].offset + records[i].size &&
 								(*head)->version == records[i].version) {
 								next = (*head)->next;
-								printf("*head%p  data:%p\n", *head, (*head)->data);
 
 								my_free((*head)->data, (*head)->original_size);
 								free(*head);
@@ -890,10 +1208,12 @@ int external_log_flush(struct hash_item* item, pthread_mutex_t* lock) {
 	if(paras != NULL) {
 		paras->data = data;
 		paras->records = log_item;
+		paras->ino = item->inode_num;
 	}
 	struct queue_head* q = malloc(sizeof(struct queue_head));
 	q->data = (void*) paras;
 	q->next = NULL;
+	
 	queue_put((void*) q, item->root);
 /*	pthread_t pid;
 	pthread_create(&pid, NULL, write_to_real_path, (void*) paras);*/
@@ -910,13 +1230,13 @@ int external_log_flush_for_fsync(int fd) {
 	struct hash_item* item;
 	int flag = 1;
 
-	hash_value = external_log_hash(file_map[fd], HASH_ITEM_NUM);
+	hash_value = external_log_hash(fd_inode_map[fd].inode_num, HASH_ITEM_NUM);
 	//printf("fsync try lock %d", hash_value);
 	pthread_mutex_lock(&hashtable_locks[hash_value]);
 	//printf("fsync already lock %d", hash_value);
 	item = hashtable[hash_value];
 	while(item != NULL) {
-		if(!strcmp(item->pathname, file_map[fd])) {
+		if(item->inode_num == fd_inode_map[fd].inode_num) {
 			if(item->is_dirty) {
 				ret = external_log_flush(item, &hashtable_locks[hash_value]);
 				flag = 0;
@@ -1109,49 +1429,7 @@ void fsync_test() {
 	}
 }
 
-void show_log_content() {
-	int fd;
-	struct descriptor_block* d;
-	struct record_item* item;
-	struct commit_block* c;
-	char desc[BLOCK_SIZE];
-	char data[BLOCK_SIZE];
-	char commit[BLOCK_SIZE];
-	char* pathname;
-	char* desc_p = desc + sizeof(struct descriptor_block);
-	int i;
 
-	fd = open("/home/dashu/external_log", O_RDWR);
-	read(fd, desc, BLOCK_SIZE);
-	read(fd, data, BLOCK_SIZE);
-	read(fd, commit, BLOCK_SIZE);
-	d = (struct descriptor_block*) desc;
-
-	while(d->sig == EXTERNAL_LOG_METADATA_BLOCK_SIG) {
-		desc_p = desc + sizeof(struct descriptor_block);
-		c = (struct commit_block*) commit;
-		pathname = my_malloc(d->path_size + 1);
-		memcpy(pathname, desc_p, d->path_size);
-		pathname[d->path_size] = '\0';
-		desc_p += d->path_size;
-		printf("pathname:%s sig:%u id:%u num_of_item:%d path_size:%d\n", 
-			pathname, d->sig, d->id, d->num_of_item, d->path_size);
-		item = (struct record_item*)desc_p;
-		for(i = 0;i < d->num_of_item;i++) {
-			printf("size:%lu offset:%lu\n", item->size, item->offset);
-			item++;
-		}
-		printf("data:%s\n", data);
-		printf("commit:%u id:%u\n", c->sig, c->id);
-		if(read(fd, desc, BLOCK_SIZE) <=0 || read(fd, data, BLOCK_SIZE) <= 0 ||
-			read(fd, commit, BLOCK_SIZE) <= 0) {
-			break;
-		}
-		free(pathname);
-		d = (struct descriptor_block*) desc;
-	}
-
-}
 
 int main() {
 	struct read_record* rec;
@@ -1173,3 +1451,193 @@ int main() {
 
 }
 */
+
+void show_log_content() {
+	int fd;
+	struct descriptor_block* d;
+	struct record_item* item;
+	struct commit_block* c;
+	char desc[BLOCK_SIZE];
+	char data[BLOCK_SIZE];
+	char commit[BLOCK_SIZE];
+	char* pathname;
+	char* desc_p = desc + sizeof(struct descriptor_block);
+	int i;
+
+	fd = open("/home/dashu/sdb1/external_log", O_RDWR);
+	read(fd, desc, BLOCK_SIZE);
+	read(fd, data, BLOCK_SIZE);
+	read(fd, commit, BLOCK_SIZE);
+	d = (struct descriptor_block*) desc;
+
+	while(d->sig == EXTERNAL_LOG_METADATA_BLOCK_SIG) {
+		desc_p = desc + sizeof(struct descriptor_block);
+		c = (struct commit_block*) commit;
+		pathname = my_malloc(d->path_size + 1);
+		memcpy(pathname, desc_p, d->path_size);
+		pathname[d->path_size] = '\0';
+		desc_p += d->path_size;
+		printf("pathname:%s sig:%u id:%u num_of_item:%d path_size:%d\n", 
+			pathname, d->sig, d->id, d->num_of_item, d->path_size);
+		item = (struct record_item*)desc_p;
+		for(i = 0;i < d->num_of_item;i++) {
+			printf("size:%lu offset:%lu\n", item->size, item->offset);
+			item++;
+		}
+		printf("data:%s\n", item);
+		printf("commit:%u id:%u\n", c->sig, c->id);
+		if(read(fd, desc, BLOCK_SIZE) <=0 || read(fd, data, BLOCK_SIZE) <= 0 ||
+			read(fd, commit, BLOCK_SIZE) <= 0) {
+			break;
+		}
+		free(pathname);
+		d = (struct descriptor_block*) desc;
+	}
+
+}
+
+void print_segment_tree(struct segment_tree_node* root) {
+	if(root == NULL) {
+		printf("null\n");
+		return;
+	}
+	printf("root:\n");
+	printf("offset:%lu size:%lu data:%s\n", root->item->offset, 
+		root->item->size, root->item->data);
+	printf("left:\n");
+	print_segment_tree(root->left);
+	printf("right:\n");
+	print_segment_tree(root->right);
+}
+
+void segment_tree_test() {
+	int i;
+	struct segment_tree_node* root = malloc(sizeof(struct segment_tree_node));
+	
+	root->left = NULL;
+	root->right = NULL;
+	root->parent = NULL;
+	root->item = malloc(sizeof(struct cache_item));
+	root->item->size = 10;
+	root->item->offset = 100;
+	root->item->version = 0;
+	root->item->data = malloc(10);
+	for(i = 0;i < 10;i++)
+		root->item->data[i] = 'a';
+
+
+
+	struct cache_item* tmp = malloc(sizeof(struct cache_item));
+	tmp->size = 10;
+	tmp->offset = 20;
+	tmp->version = 0;
+	tmp->data = malloc(tmp->size);
+	for(i = 0;i < 10;i++)
+		tmp->data[i] = 'b';
+	segment_tree_insert(root, tmp);
+
+
+	tmp = malloc(sizeof(struct cache_item));
+	tmp->size = 10;
+	tmp->offset = 180;
+	tmp->version = 0;
+	tmp->data = malloc(tmp->size);
+	for(i = 0;i < 10;i++)
+		tmp->data[i] = 'c';
+	segment_tree_insert(root, tmp);
+
+
+
+	tmp = malloc(sizeof(struct cache_item));
+	tmp->size = 12;
+	tmp->offset = 90;
+	tmp->version = 0;
+	tmp->data = malloc(tmp->size);
+	for(i = 0;i < 12;i++)
+		tmp->data[i] = 'd';
+	printf("root:%s\n", root->item->data);
+	segment_tree_insert(root, tmp);
+
+	tmp = malloc(sizeof(struct cache_item));
+	tmp->size = 12;
+	tmp->offset = 108;
+	tmp->version = 0;
+	tmp->data = malloc(tmp->size);
+	for(i = 0;i < 12;i++)
+		tmp->data[i] = 'e';
+	segment_tree_insert(root, tmp);
+
+
+	print_segment_tree(root);
+
+	tmp = malloc(sizeof(struct cache_item));
+	tmp->size = 20;
+	tmp->offset = 95;
+	tmp->version = 0;
+	tmp->data = malloc(tmp->size);
+	for(i = 0;i < 20;i++)
+		tmp->data[i] = 'f';
+	segment_tree_insert(root, tmp);
+
+	print_segment_tree(root);
+
+	printf("7 100");
+	struct read_record* record = NULL;
+	segment_tree_read(root, &record, 7, 100);
+	while(record != NULL) {
+		printf("offset:%lu size:%lu data:%s\n", record->offset, record->size, record->data);
+		record = record->next;
+	}
+
+	printf("15 100");
+	record = NULL;
+	segment_tree_read(root, &record, 15, 100);
+	while(record != NULL) {
+		printf("offset:%lu size:%lu data:%s\n", record->offset, record->size, record->data);
+		record = record->next;
+	}
+
+	printf("15 90");
+	record = NULL;
+	segment_tree_read(root, &record, 15, 90);
+	while(record != NULL) {
+		printf("offset:%lu size:%lu data:%s\n", record->offset, record->size, record->data);
+		record = record->next;
+	}
+
+	printf("30 90");
+	record = NULL;
+	segment_tree_read(root, &record, 30, 90);
+	while(record != NULL) {
+		printf("offset:%lu size:%lu data:%s\n", record->offset, record->size, record->data);
+		record = record->next;
+	}
+
+
+	printf("10 105");
+	record = NULL;
+	segment_tree_read(root, &record, 10, 105);
+	while(record != NULL) {
+		printf("offset:%lu size:%lu data:%s\n", record->offset, record->size, record->data);
+		record = record->next;
+	}
+
+	external_log_fd = open("/home/dashu/sdb1/external_log", O_RDWR);
+//	lseek(external_log_fd, 4096, 0);
+//	write(external_log_fd, " ", 1);
+	struct hash_item t;
+	t.tree_root = root;
+	segment_tree_fsync(&t);
+
+	show_log_content();
+
+}
+
+
+
+void main() {
+	uint64_t size = 6;
+	size = size*1024*1024*1024; //6G
+	my_malloc_init(size);
+	segment_tree_test();
+}

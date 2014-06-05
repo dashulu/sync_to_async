@@ -289,8 +289,8 @@ posix_fdstat (xlator_t *this, int fd, struct iatt *stbuf_p)
         if (ret == -1)
                 goto out;
 
-        if(file_map[fd])
-            external_log_stat(file_map[fd], &fstatbuf);
+        printf("fdstat ino:%lu name:%s\n", fd_inode_map[fd].inode_num, fd_inode_map[fd].name);
+        external_log_stat(fd_inode_map[fd].inode_num, &fstatbuf);
 
         if (fstatbuf.st_nlink && !S_ISDIR (fstatbuf.st_mode))
                 fstatbuf.st_nlink--;
@@ -328,7 +328,7 @@ posix_istat (xlator_t *this, uuid_t gfid, const char *basename,
 
         ret = lstat (real_path, &lstatbuf);
 
-        external_log_stat(real_path, &lstatbuf);
+//        external_log_stat(lstatbuf.st_ino, &lstatbuf);
 
         if (ret != 0) {
                 if (ret == -1) {
@@ -357,6 +357,7 @@ posix_istat (xlator_t *this, uuid_t gfid, const char *basename,
         if (!S_ISDIR (lstatbuf.st_mode))
                 lstatbuf.st_nlink --;
 
+
         iatt_from_stat (&stbuf, &lstatbuf);
 
         if (basename)
@@ -365,6 +366,10 @@ posix_istat (xlator_t *this, uuid_t gfid, const char *basename,
                 uuid_copy (stbuf.ia_gfid, gfid);
 
         posix_fill_ino_from_gfid (this, &stbuf);
+
+        external_log_stat(stbuf.ia_ino, &lstatbuf);
+        stbuf.ia_size = lstatbuf.st_size;
+        stbuf.ia_blocks = lstatbuf.st_blocks;
 
         if (buf_p)
                 *buf_p = stbuf;
@@ -387,7 +392,7 @@ posix_pstat (xlator_t *this, uuid_t gfid, const char *path,
 
         ret = lstat (path, &lstatbuf);
 
-        external_log_stat(path, &lstatbuf);
+        
 
         if (ret != 0) {
                 if (ret == -1) {
@@ -407,6 +412,7 @@ posix_pstat (xlator_t *this, uuid_t gfid, const char *path,
                 goto out;
         }
 
+       
         if ((lstatbuf.st_ino == priv->handledir.st_ino) &&
             (lstatbuf.st_dev == priv->handledir.st_dev)) {
                 errno = ENOENT;
@@ -418,12 +424,17 @@ posix_pstat (xlator_t *this, uuid_t gfid, const char *path,
 
         iatt_from_stat (&stbuf, &lstatbuf);
 
+
         if (gfid && !uuid_is_null (gfid))
                 uuid_copy (stbuf.ia_gfid, gfid);
         else
                 posix_fill_gfid_path (this, path, &stbuf);
 
         posix_fill_ino_from_gfid (this, &stbuf);
+        external_log_stat(stbuf.ia_ino, &lstatbuf);
+        stbuf.ia_size = lstatbuf.st_size;
+        stbuf.ia_blocks = lstatbuf.st_blocks;
+       
 
         if (buf_p)
                 *buf_p = stbuf;

@@ -1426,6 +1426,7 @@ posix_rename (call_frame_t *frame, xlator_t *this,
                 posix_handle_unset (this, oldloc->inode->gfid, NULL);
         }
 
+        external_log_rename(stbuf.ia_ino, real_oldpath, real_newpath);
         op_ret = sys_rename (real_oldpath, real_newpath);
         if (op_ret == -1) {
                 op_errno = errno;
@@ -1618,7 +1619,7 @@ posix_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset,
                 goto out;
         }
 
-        external_log_truncate(real_path, offset);
+        external_log_truncate(prebuf.ia_ino, offset);
         op_ret = truncate (real_path, offset);
         if (op_ret == -1) {
                 op_errno = errno;
@@ -1727,7 +1728,21 @@ posix_create (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        if(file_map[_fd] == NULL) {
+        fd_inode_map[_fd].inode_num = stbuf.ia_ino;
+        if(fd_inode_map[_fd].name == NULL) {
+            fd_inode_map[_fd].name = malloc(strlen(real_path) + 1);
+            strcpy(fd_inode_map[_fd].name, real_path);
+            fd_inode_map[_fd].name[strlen(real_path)] = '\0';
+        } else {
+            if(strcmp(fd_inode_map[_fd].name, real_path)) {
+                free(fd_inode_map[_fd].name);
+                fd_inode_map[_fd].name = malloc(strlen(real_path) + 1);
+                strcpy(fd_inode_map[_fd].name, real_path);
+                fd_inode_map[_fd].name[strlen(real_path)] = '\0';
+            }
+        }
+
+ /*       if(file_map[_fd] == NULL) {
             file_map[_fd] = malloc(strlen(real_path) + 1);
             strcpy(file_map[_fd], real_path);
             file_map[_fd][strlen(real_path)] = '\0';
@@ -1739,7 +1754,7 @@ posix_create (call_frame_t *frame, xlator_t *this,
                 file_map[_fd][strlen(real_path)] = '\0';
             }
         }
-
+*/
         if (was_present)
                 goto fill_stat;
 
@@ -1865,6 +1880,7 @@ posix_open (call_frame_t *frame, xlator_t *this,
                 flags |= O_DIRECT;
 
         _fd = open (real_path, flags, 0);
+
         if (_fd == -1) {
                 op_ret   = -1;
                 op_errno = errno;
@@ -1888,20 +1904,20 @@ posix_open (call_frame_t *frame, xlator_t *this,
                         "failed to set the fd context path=%s fd=%p",
                         real_path, fd);
 
-
-
-        if(file_map[_fd] == NULL) {
-            file_map[_fd] = malloc(strlen(real_path) + 1);
-            strcpy(file_map[_fd], real_path);
-            file_map[_fd][strlen(real_path)] = '\0';
+        fd_inode_map[_fd].inode_num = stbuf.ia_ino;
+        if(fd_inode_map[_fd].name == NULL) {
+            fd_inode_map[_fd].name = malloc(strlen(real_path) + 1);
+            strcpy(fd_inode_map[_fd].name, real_path);
+            fd_inode_map[_fd].name[strlen(real_path)] = '\0';
         } else {
-            if(strcmp(file_map[_fd], real_path)) {
-                free(file_map[_fd]);
-                file_map[_fd] = malloc(strlen(real_path) + 1);
-                strcpy(file_map[_fd], real_path);
-                file_map[_fd][strlen(real_path)] = '\0';
+            if(strcmp(fd_inode_map[_fd].name, real_path)) {
+                free(fd_inode_map[_fd].name);
+                fd_inode_map[_fd].name = malloc(strlen(real_path) + 1);
+                strcpy(fd_inode_map[_fd].name, real_path);
+                fd_inode_map[_fd].name[strlen(real_path)] = '\0';
             }
         }
+
 
         LOCK (&priv->lock);
         {
@@ -1977,6 +1993,7 @@ posix_readv (call_frame_t *frame, xlator_t *this,
         } else {
             if(record->size == size) {
                 memcpy(iobuf->ptr, record->data, size);
+                op_ret = size;
                 free(record->data);
                 free(record);
             } else {
@@ -3599,7 +3616,7 @@ posix_ftruncate (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        external_log_truncate(file_map[_fd], offset);
+        external_log_truncate(fd_inode_map[_fd].inode_num, offset);
         op_ret = ftruncate (_fd, offset);
 
         if (op_ret == -1) {

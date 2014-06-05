@@ -10,6 +10,12 @@
 #ifndef EXTERNAL_LOG_H
 #define EXTERNAL_LOG_H
 
+
+struct file_info {
+	uint64_t inode_num;
+	char* name;
+};
+
 struct read_record {
 	void* data;
 	uint64_t size;
@@ -21,6 +27,7 @@ struct read_record {
 struct write_to_real_path_para{
 	char* records;
 	char* data;
+	uint64_t ino;
 };
 
 
@@ -77,14 +84,18 @@ struct cache_item {
 
 struct hash_item {
 	char* pathname;
+	uint64_t inode_num;
 	int is_dirty;
 	uint64_t dirty_size; 
 	int64_t size;
 	int64_t blocks;
 	time_t mtime;
 
+	int fd;
+
 	pthread_t background_pid;
 	struct queue_root* root;
+	struct segment_tree_node* tree_root;
 
 
 //	pthread_mutex_t lock;
@@ -99,16 +110,19 @@ struct hash_item {
 #define HASH_ITEM_NUM 4099
 #define EXTERNAL_LOG_METADATA_BLOCK_SIG 0xbeefbeef
 #define BLOCK_SIZE 4096
-#define MAX_DIRTY_SIZE 524288000  // 500M
+#define MAX_DIRTY_SIZE 52428800  // 50M
 #define TIME_TO_FLUSH 5
 
 #define EXTERNAL_LOG_WRITEV 1
 #define EXTERNAL_LOG_TRUNCATE 2
 #define EXTERNAL_LOG_UNLINK 3
+#define EXTERNAL_LOG_RENAME 4
+
 
 
 // a map from fd to the path of file. fd is the index;
-char* file_map[NUM_FD];
+//char* file_map[NUM_FD];
+struct file_info fd_inode_map[NUM_FD];
 pthread_mutex_t file_map_lock;
 
 int external_log_fd;
@@ -127,16 +141,29 @@ pthread_mutex_t hashtable_locks[HASH_ITEM_NUM];
 int init_hashtable(struct hash_item* hashtable, int num);
 int insert_item(int fd, struct iovec *vec, int count, uint64_t offset);
 void destroy_hash_item(struct hash_item* item);
-unsigned int external_log_hash(const char* str, int upper_bound);
+//unsigned int external_log_hash(const char* str, int upper_bound);
+unsigned int external_log_hash(uint64_t num, int upper_bound);
 int external_log_init();
 int external_log_finish();
 int external_log_flush_for_fsync(int fd);
 int external_log_read(int fd, struct read_record** record, uint64_t size, uint64_t offset);
 //struct hash_item* get_hash_item(int fd);
 //int external_log_stat_by_fd(int fd, struct stat* obj);
-int external_log_stat(const char* path, struct stat* obj);
-int external_log_truncate(const char* path, uint64_t size);
-int external_log_unlink(const char* path);
+int external_log_stat(uint64_t ino, struct stat* obj);
+//int external_log_stat2(uint64_t ino, struct stat* obj);
+int external_log_truncate(uint64_t ino, uint64_t size);
+int external_log_unlink(uint64_t ino);
+int external_log_rename(uint64_t ino, const char* old_name, char* new_name);
 
+#endif
+
+#ifndef SEGMENT_TREE
+#define SEGMENT_TREE
+struct segment_tree_node {
+	struct segment_tree_node* parent;
+	struct segment_tree_node* left;
+	struct segment_tree_node* right;
+	struct cache_item* item;
+};
 
 #endif
