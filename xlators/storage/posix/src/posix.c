@@ -2003,7 +2003,7 @@ posix_readv (call_frame_t *frame, xlator_t *this,
                 while(record != NULL) {
                     tmp = record;
                     memcpy(iobuf->ptr + record->offset - offset, record->data, record->size);
-                    my_offset = record->offset + record->size;
+                    my_offset = my_offset > record->offset + record->size ? my_offset : record->offset + record->size;
                     record = record->next;
                     free(tmp->data);
                     free(tmp);
@@ -2126,7 +2126,7 @@ __posix_writev (int fd, struct iovec *vector, int count, off_t startoff,
         char            *alloc_buf = NULL;
         off_t           internal_off = 0;
 
-        return insert_item(fd, vector, count, startoff);
+        return segment_tree_insert_item(fd, vector, count, startoff);
 //        insert_item(fd, vector, count, startoff);
         /* Check for the O_DIRECT flag during open() */
         if (!odirect) 

@@ -9,7 +9,7 @@ struct queue_root;
 #define ONDISKINODE	1
 
 struct queue_head {
-	char* data;
+	uint64_t data;
 	struct queue_head *next;
 };
 

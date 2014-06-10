@@ -75,11 +75,13 @@ struct cache_item {
 	uint64_t size;
 	uint64_t original_size;
 	uint64_t offset;
+	uint32_t external_log_id;
+	uint32_t finish_log_id;
 	int is_dirty;
 	uint32_t version;
 //	bool is_commiting;
 	struct cache_item* next;
-//	pthread_mutex_t lock;
+	pthread_mutex_t lock;
 };
 
 struct hash_item {
@@ -154,6 +156,7 @@ int external_log_stat(uint64_t ino, struct stat* obj);
 int external_log_truncate(uint64_t ino, uint64_t size);
 int external_log_unlink(uint64_t ino);
 int external_log_rename(uint64_t ino, const char* old_name, char* new_name);
+int segment_tree_insert_item(int fd, struct iovec *vec, int count, uint64_t offset);
 
 #endif
 
