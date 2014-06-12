@@ -208,7 +208,7 @@ static uint64_t get_size(struct segment_tree_node* root, int *count, uint64_t id
 	}
 }
 
-static void segment_tree_fsync_helper(struct segment_tree_node* root, char* ptr, int *count,
+static void segment_tree_fsync_helper(uint64_t total_size, uint64_t desc_size, struct segment_tree_node* root, char* ptr, int *count,
 										void* desc, int *desc_count, uint32_t id) {
 	if(root == NULL)
 		return;
@@ -219,16 +219,20 @@ static void segment_tree_fsync_helper(struct segment_tree_node* root, char* ptr,
 		root->item->is_dirty = 0;
 		(*count) += root->item->size;
 		char* tmp = ((char*)desc + (*desc_count)*sizeof(struct record_item));
-		*((uint64_t*) tmp) = root->item->size;
+//		*((uint64_t*) tmp) = root->item->size;
+		memcpy(tmp, (char*)&root->item->size, sizeof(root->item->size));
 		tmp += sizeof(uint64_t);
-		*((uint64_t*) tmp) = root->item->offset;
+		memcpy(tmp, (char*)&root->item->offset, sizeof(root->item->offset));
+//		*((uint64_t*) tmp) = root->item->offset;
 		tmp += sizeof(uint64_t);
-		*((uint64_t*) tmp) = root->item->version;
+		memcpy(tmp, (char*)&root->item->version, sizeof(root->item->version));
+//		*((uint64_t*) tmp) = root->item->version;
+		(*desc_count)++;
 	}
 	pthread_mutex_unlock(&root->item->lock);
-	(*desc_count)++;
-	segment_tree_fsync_helper(root->left, ptr, count, desc, desc_count, id);
-	segment_tree_fsync_helper(root->right, ptr, count, desc, desc_count, id);
+	
+	segment_tree_fsync_helper(total_size, desc_size, root->left, ptr, count, desc, desc_count, id);
+	segment_tree_fsync_helper(total_size, desc_size, root->right, ptr, count, desc, desc_count, id);
 }
 
 void segment_tree_fsync(struct hash_item* item) {
@@ -241,6 +245,9 @@ void segment_tree_fsync(struct hash_item* item) {
 	void* ptr;
 	void* ptr_copy;
 	char* data_copy;
+	int hash_value;
+
+	hash_value = external_log_hash(item->inode_num, HASH_ITEM_NUM);
 
 	pthread_mutex_lock(&external_log_id_lock);
 	local_external_id = external_log_id;
@@ -253,10 +260,7 @@ void segment_tree_fsync(struct hash_item* item) {
 	total_size = UPPER(data_size + desc_size + sizeof(struct commit_block), BLOCK_SIZE);
 
 	printf("data size:%lu\n", data_size);
-	pthread_mutex_lock(&external_log_id_lock);
-	local_external_id = external_log_id;
-	external_log_id++;
-	pthread_mutex_unlock(&external_log_id_lock);
+
 	pthread_mutex_lock(&external_log_offset_lock);
 	local_external_offset = external_log_offset;
 	external_log_offset += total_size;
@@ -288,12 +292,13 @@ void segment_tree_fsync(struct hash_item* item) {
 
 	int data_count = 0;
 	int desc_count = 0;
-	segment_tree_fsync_helper(item->tree_root, data_copy, &data_count, ptr_copy, &desc_count, local_external_id);
+	segment_tree_fsync_helper(total_size, desc_size, item->tree_root, data_copy, &data_count, ptr_copy, &desc_count, local_external_id);
 	data_copy += data_size;
 	*((uint32_t*) data_copy) = EXTERNAL_LOG_METADATA_BLOCK_SIG;
 	data_copy += sizeof(uint32_t);
 //	*((uint32_t*) data_copy) = local_external_id;
 	memcpy(data_copy, (char*)(&local_external_id), sizeof(local_external_id));
+	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	msync(ptr, total_size, MS_SYNC);
 	munmap(ptr, total_size);
 	struct queue_head* q = malloc(sizeof(struct queue_head));
@@ -322,7 +327,7 @@ void *background_flush_thread(void* obj) {
                 p = p->next;
             }
         }
-        sleep(1);
+        sleep(5);
     }
 }
 
@@ -1057,13 +1062,13 @@ int external_log_read(int fd, struct read_record** record, uint64_t size, uint64
 	return 0;
 }
 
-void background_write_fn_helper(struct segment_tree_node* root, int fd, uint64_t log_id) {
+void background_write_fn_helper(struct segment_tree_node* root, int fd, uint64_t log_id, int hash_value) {
 	if(root == NULL)
 		return;
 	char* tmp = NULL;
 	uint64_t size ;
 	uint64_t offset;
-	pthread_mutex_lock(&root->item->lock);
+	pthread_mutex_lock(&hashtable_locks[hash_value]);
 	if(!root->item->is_dirty && root->item->external_log_id == log_id) {
 		tmp = malloc(root->item->size);
 		size = root->item->size;
@@ -1071,44 +1076,26 @@ void background_write_fn_helper(struct segment_tree_node* root, int fd, uint64_t
 		root->item->finish_log_id = root->item->external_log_id;
 		memcpy(tmp, root->item->data, size);
 	}
-	pthread_mutex_unlock(&root->item->lock);
+	pthread_mutex_unlock(&hashtable_locks[hash_value]);
 	pwrite(fd, tmp, size, offset);
 	if(tmp != NULL)
 		free(tmp);
-	background_write_fn_helper(root->left, fd, log_id);
-	background_write_fn_helper(root->right, fd, log_id);
+	background_write_fn_helper(root->left, fd, log_id, hash_value);
+	background_write_fn_helper(root->right, fd, log_id, hash_value);
 }
 
 void *background_write_fn(void* obj) {
 	struct queue_root* root = ((struct hash_item*) obj)->root;
 	struct hash_item* my_item = (struct hash_item*) obj;
 	int fd = ((struct hash_item*) obj)->fd;
-//	struct write_to_real_path_para* paras;
-//	struct descriptor_block* desc;
-//	char* filename;
-//	char* data;
-//	struct record_item* records;
-//	int i; 
-//	uint64_t ino;
-//	struct hash_item* h_item;
-//	struct cache_item** head;
-//	struct cache_item* next;
 	struct queue_head* item;
-//	uint64_t data_size;
-//	uint64_t free_data_size = 0;
+
 
 	while(1) {
 		item = queue_get(root);
 		if(item) {
-			background_write_fn_helper(my_item->tree_root, fd, item->data);
-/*			int hash_value = external_log_hash(my_item->ino, HASH_ITEM_NUM);
-			pthread_mutex_lock(&hashtable_locks[hash_value]);
-			if(my_item->tree_root != NULL) {
-				pthread_mutex_lock(&my_item->tree_root->item->lock);
-			} else {
-				pthread_mutex_unlock(&hashtable_locks[hash_value]);
-			}
-			*/
+			int hash_value = external_log_hash(my_item->inode_num, HASH_ITEM_NUM);
+			background_write_fn_helper(my_item->tree_root, fd, item->data, hash_value);
 			free(item);
 		} else {
 			sleep(1);
@@ -1396,7 +1383,7 @@ int external_log_flush_for_fsync(int fd) {
 
 	hash_value = external_log_hash(fd_inode_map[fd].inode_num, HASH_ITEM_NUM);
 	//printf("fsync try lock %d", hash_value);
-//	pthread_mutex_lock(&hashtable_locks[hash_value]);
+	pthread_mutex_lock(&hashtable_locks[hash_value]);
 	//printf("fsync already lock %d", hash_value);
 	item = hashtable[hash_value];
 	while(item != NULL) {
